@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# 步骤 3：把 jar 打成一个多架构镜像（linux/amd64 + linux/arm64）并推送到 ECR
+# 步骤 3（方式 A：单机交叉构建）：在一台机器上把 jar 打成多架构镜像并推送到 ECR
 #
 # 产物是一个 manifest list（OCI image index）：同一个 tag 下同时包含两种架构的镜像，
 # 节点拉取时由 containerd 按自身架构自动选择正确的那一份。
+#
+# 如果你想在 x86 与 Graviton 实例上分别"原生"构建，请改用方式 B：
+#   两台机器各自执行 ./scripts/03a-build-push-native.sh
+#   任意一台再执行     ./scripts/03b-create-manifest-list.sh
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 
@@ -26,20 +30,9 @@ if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
   docker buildx create --name "${BUILDER_NAME}" --driver docker-container --bootstrap >/dev/null
 fi
 
-# ---------- ECR 仓库 ----------
-if ! aws ecr describe-repositories --repository-names "${ECR_REPO}" --region "${AWS_REGION}" >/dev/null 2>&1; then
-  log "创建 ECR 仓库：${ECR_REPO}"
-  aws ecr create-repository \
-    --repository-name "${ECR_REPO}" \
-    --region "${AWS_REGION}" \
-    --image-scanning-configuration scanOnPush=true >/dev/null
-else
-  log "ECR 仓库已存在：${ECR_REPO}"
-fi
-
-log "登录 ECR：${ECR_REGISTRY}"
-aws ecr get-login-password --region "${AWS_REGION}" \
-  | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+# ---------- ECR 仓库与登录 ----------
+ensure_ecr_repo
+ecr_login
 
 # ---------- 构建并推送 ----------
 # 本 Dockerfile 只有 FROM/COPY/ENV，没有需要目标架构执行的 RUN，

@@ -33,10 +33,12 @@
 │   ├── service.yaml                # ClusterIP，同时选中两组 Pod
 │   └── service-nlb.yaml            # 可选：对外暴露（会创建 NLB）
 └── scripts/
-    ├── env.sh                      # 共享变量（AWS_REGION / CLUSTER_NAME / IMAGE_TAG ...）
+    ├── env.sh                      # 共享变量与工具函数（AWS_REGION / CLUSTER_NAME / IMAGE_TAG ...）
     ├── 01-create-cluster.sh
     ├── 02-build-jar.sh
-    ├── 03-build-push-image.sh
+    ├── 03-build-push-image.sh      # 方式 A：一台机器交叉构建两种架构
+    ├── 03a-build-push-native.sh    # 方式 B：在当前实例上原生构建单架构并推送
+    ├── 03b-create-manifest-list.sh # 方式 B：把两个单架构 tag 合并成多架构 tag
     ├── 04-deploy.sh
     ├── 05-verify.sh
     └── 90-cleanup.sh
@@ -134,6 +136,17 @@ curl -s localhost:8080/api/info | jq .architecture
 
 ## 步骤 3：把 jar 打成多架构镜像并推送到 ECR
 
+两种方式，产物完全等价（同一个 tag 下的 manifest list），按需选一个：
+
+| | 方式 A：单机交叉构建 | 方式 B：两台机器分别原生构建 |
+| --- | --- | --- |
+| 脚本 | `03-build-push-image.sh` | `03a-build-push-native.sh` ×2 + `03b-create-manifest-list.sh` |
+| 机器 | 1 台（x86 或 Graviton 都行） | 2 台：x86 + Graviton |
+| 依赖 | buildx（`docker-container` 驱动） | 只要 `docker build` / `docker push` |
+| 适用 | 本 demo 这种「只 COPY jar」的镜像 | Dockerfile 里有 `RUN` 且需要编译原生依赖时 |
+
+### 方式 A：一台机器构建两种架构（默认）
+
 ```bash
 ./scripts/03-build-push-image.sh
 ```
@@ -166,6 +179,58 @@ ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
 docker buildx imagetools inspect <account>.dkr.ecr.<region>.amazonaws.com/java-arch-demo:1.0.0
 # 应输出两条 Platform：linux/amd64 与 linux/arm64
 ```
+
+### 方式 B：在 x86 与 Graviton 实例上分别原生构建
+
+思路是「两次单架构构建 + 一次 manifest 合并」：各自推送带架构后缀的 tag，再把两个 tag 合并成一个
+多架构 tag。合并只改 registry 里的 manifest，不重新构建、不上传镜像层，几秒钟完成。
+
+```
+x86 实例      docker build → push  <repo>:1.0.0-amd64  ┐
+                                                        ├─→ 合并 → <repo>:1.0.0（manifest list）
+Graviton 实例 docker build → push  <repo>:1.0.0-arm64  ┘
+```
+
+在 **x86 实例**（例如 c6a.xlarge）上：
+
+```bash
+git clone <this-repo> && cd eks-multi-arch-demo
+./scripts/02-build-jar.sh                 # 或从别处 scp 现成的 jar，jar 与架构无关
+./scripts/03a-build-push-native.sh        # 自动识别 uname -m → 推送 <repo>:1.0.0-amd64
+```
+
+在 **Graviton 实例**（例如 c6g.xlarge）上执行同样两条命令，脚本会自动推送 `<repo>:1.0.0-arm64`。
+
+两边都推送完成后，在任意一台上合并：
+
+```bash
+./scripts/03b-create-manifest-list.sh
+# 等价命令（buildx 版）：
+#   docker buildx imagetools create -t <repo>:1.0.0 <repo>:1.0.0-amd64 <repo>:1.0.0-arm64
+# 没有 buildx 时脚本自动改用：
+#   docker manifest create <repo>:1.0.0 --amend <repo>:1.0.0-amd64 --amend <repo>:1.0.0-arm64
+#   docker manifest push   <repo>:1.0.0
+```
+
+`03b` 会先检查两个单架构 tag 是否都已存在，缺哪个就报错提示去对应架构的机器上构建，
+合并完再打印 manifest list 校验结果。之后的 `04-deploy.sh` / `05-verify.sh` 完全不变。
+
+几个实用开关：
+
+```bash
+IMAGE_TAG=1.0.1 ./scripts/03a-build-push-native.sh          # 换版本号
+TARGET_ARCH=arm64 ./scripts/03a-build-push-native.sh         # 强制目标架构（与本机不同时退化为交叉构建，会提示）
+IMAGE_URI=my-registry:5000/java-arch-demo:1.0.0 \
+  INSECURE_REGISTRY=true ./scripts/03b-create-manifest-list.sh   # 用自建 registry（非 ECR 时自动跳过 ECR 登录）
+```
+
+两台机器的准备工作：都需要 `docker` + AWS 凭证（能 push 到同一个 ECR 仓库），
+以及 JDK 21 或可用的 docker（`02-build-jar.sh` 会自动回退到容器内构建，
+`maven:3.9-amazoncorretto-21` 同时提供 amd64 与 arm64）。ECR 仓库由先跑的那台机器创建，脚本是幂等的。
+
+> 注意：**不要**两台机器都推送同一个 `:1.0.0` tag。后推的会覆盖先推的，
+> 最终 tag 只剩单一架构，另一种架构的节点会以 `no match for platform` 拉取失败。
+> 架构后缀 + manifest 合并就是为了避免这个坑。
 
 ## 步骤 4：把服务部署到 x86 与 Graviton 节点
 
@@ -279,6 +344,10 @@ DELETE_ECR=true DELETE_CLUSTER=true ./scripts/90-cleanup.sh
   其中包含 `linux/amd64` 与 `linux/arm64` 两个 manifest。
 - amd64 镜像启动后报告 `osArch=amd64`；arm64 镜像在 QEMU 模拟下启动后报告 `osArch=aarch64`，
   两者用的是同一个 jar。
+- 方式 B 的完整链路（用本地 registry 验证）：`03a` 原生构建并推送 `:1.0.0-amd64`，
+  另一次推送 `:1.0.0-arm64`，`03b` 合并出的 `:1.0.0` 是包含 `linux/amd64` + `linux/arm64`
+  的 manifest list；在移除 buildx 插件的情况下，`docker build` + `docker manifest create/push`
+  的回退路径同样跑通。
 - `eksctl create cluster -f infra/cluster.yaml --dry-run` 校验通过（EKS 1.36、两个节点组、
   c6a.xlarge/c6g.xlarge、AL2023）。
 

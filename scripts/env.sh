@@ -25,14 +25,59 @@ die()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1，请先安装"; }
 
-# 解析 AWS 账号并拼出 ECR 镜像地址（需要有效的 AWS 凭证）
+# 宿主机 CPU 架构 → 容器/Kubernetes 使用的架构名
+host_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64)  echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    *) die "不支持的架构：$(uname -m)" ;;
+  esac
+}
+
+# 解析镜像地址。默认使用 ECR（需要 AWS 凭证）；
+# 也可以直接 export IMAGE_URI=<registry>/<repo>:<tag> 指定任意 registry。
 resolve_image_uri() {
+  if [[ -n "${IMAGE_URI:-}" ]]; then
+    export IMAGE_REPO_URI="${IMAGE_URI%:*}"
+  else
+    need aws
+    AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
+    [[ -n "${AWS_ACCOUNT_ID}" && "${AWS_ACCOUNT_ID}" != "None" ]] || die "无法获取 AWS 账号 ID，请检查 AWS 凭证"
+    export AWS_ACCOUNT_ID
+    export ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    export IMAGE_REPO_URI="${ECR_REGISTRY}/${ECR_REPO}"
+    export IMAGE_URI="${IMAGE_REPO_URI}:${IMAGE_TAG}"
+  fi
+  export REGISTRY_HOST="${IMAGE_URI%%/*}"
+  export ECR_REGISTRY="${ECR_REGISTRY:-${REGISTRY_HOST}}"
+  # 单架构 tag：<repo>:<tag>-amd64 / <repo>:<tag>-arm64
+  export IMAGE_URI_AMD64="${IMAGE_REPO_URI}:${IMAGE_TAG}-amd64"
+  export IMAGE_URI_ARM64="${IMAGE_REPO_URI}:${IMAGE_TAG}-arm64"
+}
+
+is_ecr_registry() { [[ "${REGISTRY_HOST:-}" == *.amazonaws.com ]]; }
+
+# 幂等创建 ECR 仓库
+ensure_ecr_repo() {
+  is_ecr_registry || { log "非 ECR registry（${REGISTRY_HOST}），跳过仓库创建"; return 0; }
   need aws
-  AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
-  [[ -n "${AWS_ACCOUNT_ID}" && "${AWS_ACCOUNT_ID}" != "None" ]] || die "无法获取 AWS 账号 ID，请检查 AWS 凭证"
-  export AWS_ACCOUNT_ID
-  export ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-  export IMAGE_URI="${IMAGE_URI:-${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}}"
+  if aws ecr describe-repositories --repository-names "${ECR_REPO}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+    log "ECR 仓库已存在：${ECR_REPO}"
+  else
+    log "创建 ECR 仓库：${ECR_REPO}"
+    aws ecr create-repository \
+      --repository-name "${ECR_REPO}" \
+      --region "${AWS_REGION}" \
+      --image-scanning-configuration scanOnPush=true >/dev/null
+  fi
+}
+
+ecr_login() {
+  is_ecr_registry || { log "非 ECR registry（${REGISTRY_HOST}），跳过登录"; return 0; }
+  need aws
+  log "登录 ECR：${REGISTRY_HOST}"
+  aws ecr get-login-password --region "${AWS_REGION}" \
+    | docker login --username AWS --password-stdin "${REGISTRY_HOST}"
 }
 
 # 找到一个 >= 21 的 JDK（Spring Boot 3.5 + Java 21）
