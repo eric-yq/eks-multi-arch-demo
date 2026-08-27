@@ -12,22 +12,8 @@ log "集群：${CLUSTER_NAME}    区域：${AWS_REGION}"
 if eksctl get cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1; then
   log "集群 ${CLUSTER_NAME} 已存在，跳过创建"
 else
-  mkdir -p "${BUILD_DIR}"
-  RENDERED="${BUILD_DIR}/cluster.rendered.yaml"
-
-  # 按 CLUSTER_NAME / AWS_REGION 渲染配置；换区域时移除硬编码的可用区，交给 eksctl 自动选择
-  python3 - "$REPO_ROOT/infra/cluster.yaml" "$RENDERED" "$CLUSTER_NAME" "$AWS_REGION" <<'PY'
-import sys, yaml
-src, dst, name, region = sys.argv[1:5]
-cfg = yaml.safe_load(open(src))
-cfg["metadata"]["name"] = name
-cfg["metadata"]["region"] = region
-if region != "us-east-1":
-    cfg.pop("availabilityZones", None)
-yaml.safe_dump(cfg, open(dst, "w"), sort_keys=False, allow_unicode=True)
-print(f"已渲染配置 -> {dst}")
-PY
-
+  RENDERED="$(render_cluster_config)"
+  log "已渲染配置 -> ${RENDERED}"
   warn "即将创建 EKS 集群，会产生费用，预计 15~20 分钟"
   eksctl create cluster -f "${RENDERED}"
 fi

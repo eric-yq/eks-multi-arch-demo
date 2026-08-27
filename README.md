@@ -8,6 +8,7 @@
 | EKS 集群 | `multi-arch-demo`，Kubernetes 1.36，us-east-1 |
 | 节点组 1 | `ng-x86-c6a`：1 × `c6a.xlarge`（AMD64） |
 | 节点组 2 | `ng-graviton-c6g`：1 × `c6g.xlarge`（Graviton2 / ARM64） |
+| 节点组 3（可增量添加） | `ng-graviton-c7g`：1 × `c7g.xlarge`（Graviton3 / ARM64），见步骤 6 |
 | Java 应用 | Spring Boot 3.5.16 + Java 21，暴露架构信息与一个简易 CPU 压测接口 |
 | 镜像 | 单个 tag 的 manifest list，同时包含 `linux/amd64` 与 `linux/arm64` |
 | 部署 | 两个 Deployment 用 `nodeSelector: kubernetes.io/arch` 分别落到 x86 与 Graviton，一个 Service 统一入口 |
@@ -29,6 +30,7 @@
 │   ├── 00-namespace.yaml
 │   ├── deployment-amd64.yaml       # nodeSelector kubernetes.io/arch=amd64
 │   ├── deployment-arm64.yaml       # nodeSelector kubernetes.io/arch=arm64
+│   ├── deployment-c7g.yaml         # 只落在 c7g.xlarge（Graviton3）节点组
 │   ├── deployment-mixed.yaml       # 进阶：一个 Deployment 跨两种架构均匀分布
 │   ├── service.yaml                # ClusterIP，同时选中两组 Pod
 │   └── service-nlb.yaml            # 可选：对外暴露（会创建 NLB）
@@ -41,6 +43,7 @@
     ├── 03b-create-manifest-list.sh # 方式 B：把两个单架构 tag 合并成多架构 tag
     ├── 04-deploy.sh
     ├── 05-verify.sh
+    ├── 06-add-c7g-nodegroup.sh     # 增量：新增 c7g 节点组并部署到它上面
     └── 90-cleanup.sh
 ```
 
@@ -324,11 +327,64 @@ kubectl -n demo get svc java-arch-demo-nlb -w    # 等 EXTERNAL-IP
 
 ---
 
+## 步骤 6（增量）：新增 c7g.xlarge 节点组并把服务部署上去
+
+给**已有集群**再加一个 Graviton3 节点组（1 台 `c7g.xlarge`），并把同一个镜像部署到它上面：
+
+```bash
+./scripts/06-add-c7g-nodegroup.sh
+```
+
+脚本按顺序做四件事，全程幂等（节点组/Deployment 已存在则跳过创建、只做滚动更新）：
+
+1. `eksctl create nodegroup -f infra/cluster.yaml --include=ng-graviton-c7g` 创建节点组（约 3~5 分钟）
+2. 等新节点带上 `eks.amazonaws.com/nodegroup=ng-graviton-c7g` 标签并 Ready
+3. 用同一个多架构镜像 tag 部署 `k8s/deployment-c7g.yaml`，并重新 apply Service
+4. 打印验证信息：节点表、新 Pod 落点、容器内 `uname -m`、`/api/info` 采样、三个节点组的 Pod 分布
+
+调度上有两个容易踩的点，manifest 里都处理了：
+
+```yaml
+metadata:
+  labels:
+    app: java-arch-demo
+    arch: arm64-c7g          # 不能写 arm64：会和 deployment-arm64 的 selector 撞车、互相抢 Pod
+spec:
+  selector:
+    matchLabels:
+      app: java-arch-demo
+      arch: arm64-c7g
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+        node.kubernetes.io/instance-type: c7g.xlarge   # c6g 也是 arm64，只按架构选会落错节点组
+```
+
+`Service` 的 selector 只有 `app: java-arch-demo`，所以新 Pod 会自动加入同一个服务后端，
+访问同一个地址即可看到流量分布在 c6a / c6g / c7g 三种实例上。
+
+想改节点组名字：`C7G_NODEGROUP=my-ng ./scripts/06-add-c7g-nodegroup.sh`
+（同时记得改 `infra/cluster.yaml` 里的节点组名）。
+
+关于 c6g 与 c7g：us-east-1 按需价格 `c6g.xlarge` $0.136/小时、`c7g.xlarge` $0.145/小时，
+c7g（Graviton3）单价略高但单核性能明显更好，通常性价比更优。用同一份 jar 直接对比：
+
+```bash
+kubectl -n demo port-forward deploy/java-arch-demo-arm64 8081:8080   # c6g
+kubectl -n demo port-forward deploy/java-arch-demo-c7g   8082:8080   # c7g
+curl -s 'localhost:8081/api/bench?iterations=2000000' | jq '{platform,elapsedMillis,opsPerSecond}'
+curl -s 'localhost:8082/api/bench?iterations=2000000' | jq '{platform,elapsedMillis,opsPerSecond}'
+```
+
 ## 清理
 
 ```bash
 # 只删 k8s 资源
 ./scripts/90-cleanup.sh
+
+# 只删 c7g 节点组，保留集群与其他节点组
+DELETE_C7G=true ./scripts/90-cleanup.sh
 
 # 连 ECR 仓库和整个集群一起删（集群删除约 10~15 分钟）
 DELETE_ECR=true DELETE_CLUSTER=true ./scripts/90-cleanup.sh

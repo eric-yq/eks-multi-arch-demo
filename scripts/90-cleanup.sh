@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 清理：默认只删除 Kubernetes 资源。
-# 删除 ECR 仓库与 EKS 集群需要显式开关，避免误删：
-#   DELETE_ECR=true DELETE_CLUSTER=true ./scripts/90-cleanup.sh
+# 删除节点组 / ECR 仓库 / EKS 集群需要显式开关，避免误删：
+#   DELETE_C7G=true ./scripts/90-cleanup.sh                      # 只删 c7g 节点组
+#   DELETE_ECR=true DELETE_CLUSTER=true ./scripts/90-cleanup.sh  # 删仓库 + 整个集群
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 
@@ -9,6 +10,14 @@ need kubectl
 
 log "删除命名空间 ${NAMESPACE} 内的 demo 资源（含可能创建的 NLB Service）"
 kubectl delete namespace "${NAMESPACE}" --ignore-not-found=true --wait=true || warn "命名空间删除失败或不存在"
+
+if [[ "${DELETE_C7G:-false}" == "true" ]]; then
+  need eksctl
+  C7G_NODEGROUP="${C7G_NODEGROUP:-ng-graviton-c7g}"
+  warn "删除节点组 ${C7G_NODEGROUP}（保留集群与其他节点组）"
+  eksctl delete nodegroup --cluster "${CLUSTER_NAME}" --region "${AWS_REGION}" \
+    --name "${C7G_NODEGROUP}" --wait || warn "节点组删除失败或不存在"
+fi
 
 if [[ "${DELETE_ECR:-false}" == "true" ]]; then
   need aws

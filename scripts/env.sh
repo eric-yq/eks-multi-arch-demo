@@ -80,6 +80,38 @@ ecr_login() {
     | docker login --username AWS --password-stdin "${REGISTRY_HOST}"
 }
 
+# 按 CLUSTER_NAME / AWS_REGION 渲染 infra/cluster.yaml，输出渲染后的文件路径。
+# 换区域时会去掉硬编码的可用区，交给 eksctl 自动选择。
+render_cluster_config() {
+  local src="${REPO_ROOT}/infra/cluster.yaml"
+  local rendered="${BUILD_DIR}/cluster.rendered.yaml"
+  mkdir -p "${BUILD_DIR}"
+
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
+    python3 - "${src}" "${rendered}" "${CLUSTER_NAME}" "${AWS_REGION}" <<'PY'
+import sys, yaml
+src, dst, name, region = sys.argv[1:5]
+cfg = yaml.safe_load(open(src))
+cfg["metadata"]["name"] = name
+cfg["metadata"]["region"] = region
+if region != "us-east-1":
+    cfg.pop("availabilityZones", None)
+yaml.safe_dump(cfg, open(dst, "w"), sort_keys=False, allow_unicode=True)
+PY
+  else
+    # 没有 python3 + PyYAML 时退化为 sed 替换
+    sed -e "s|^  name: multi-arch-demo$|  name: ${CLUSTER_NAME}|" \
+        -e "s|^  region: us-east-1$|  region: ${AWS_REGION}|" \
+        "${src}" > "${rendered}"
+    if [[ "${AWS_REGION}" != "us-east-1" ]]; then
+      warn "未检测到 python3 + PyYAML：infra/cluster.yaml 里的 availabilityZones 仍是 us-east-1 的，"
+      warn "换区域时请手工修改，或安装 PyYAML（pip3 install pyyaml）后重跑"
+    fi
+  fi
+
+  echo "${rendered}"
+}
+
 # 找到一个 >= 21 的 JDK（Spring Boot 3.5 + Java 21）
 find_jdk21() {
   local candidate

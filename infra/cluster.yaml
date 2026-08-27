@@ -70,7 +70,7 @@ managedNodeGroups:
       withAddonPolicies:
         cloudWatch: true
 
-  # ---------- 节点组 2：ARM64 / Graviton ----------
+  # ---------- 节点组 2：ARM64 / Graviton2 ----------
   - name: ng-graviton-c6g
     amiFamily: AmazonLinux2023
     instanceType: c6g.xlarge
@@ -87,6 +87,31 @@ managedNodeGroups:
     tags:
       nodegroup-arch: arm64
       nodegroup-instance-type: c6g.xlarge
+    iam:
+      withAddonPolicies:
+        cloudWatch: true
+
+  # ---------- 节点组 3：ARM64 / Graviton3（增量添加）----------
+  # 集群已存在时不要重跑 create cluster，用下面的脚本单独添加这个节点组：
+  #   ./scripts/06-add-c7g-nodegroup.sh
+  #   （等价：eksctl create nodegroup -f infra/cluster.yaml --include=ng-graviton-c7g）
+  - name: ng-graviton-c7g
+    amiFamily: AmazonLinux2023
+    instanceType: c7g.xlarge
+    desiredCapacity: 1
+    minSize: 1
+    maxSize: 2
+    volumeSize: 50
+    volumeType: gp3
+    privateNetworking: true
+    labels:
+      demo.arch: arm64
+      demo.cpu: aws-graviton3
+      demo.nodegroup: ng-graviton-c7g
+      workload: java-demo
+    tags:
+      nodegroup-arch: arm64
+      nodegroup-instance-type: c7g.xlarge
     iam:
       withAddonPolicies:
         cloudWatch: true
