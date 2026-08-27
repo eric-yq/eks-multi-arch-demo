@@ -1,0 +1,24 @@
+# 可选：对外暴露服务（会创建一个 NLB，产生额外费用，demo 结束记得删除）
+#   kubectl apply -f k8s/service-nlb.yaml
+#   kubectl -n demo get svc java-arch-demo-nlb -w
+#
+# 注意：本文件使用 in-tree 的 NLB 注解，无需额外安装 AWS Load Balancer Controller。
+# 生产环境建议安装 AWS Load Balancer Controller 并使用 target-type=ip 的 NLB/ALB。
+apiVersion: v1
+kind: Service
+metadata:
+  name: java-arch-demo-nlb
+  namespace: demo
+  labels:
+    app: java-arch-demo
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+spec:
+  type: LoadBalancer
+  selector:
+    app: java-arch-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

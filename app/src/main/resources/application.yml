@@ -1,0 +1,30 @@
+spring:
+  application:
+    name: java-arch-demo
+
+server:
+  port: 8080
+  shutdown: graceful
+
+demo:
+  version: 1.0.0
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true          # 暴露 /actuator/health/liveness 与 /actuator/health/readiness
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+logging:
+  level:
+    root: INFO

@@ -1,0 +1,94 @@
+# 把同一个镜像（同一个 tag）调度到 Graviton 节点组（c6g.xlarge）
+# 镜像是 manifest list，kubelet 会自动拉取 arm64 那一份，无需改 image tag。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: java-arch-demo-arm64
+  namespace: demo
+  labels:
+    app: java-arch-demo
+    arch: arm64
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: java-arch-demo
+      arch: arm64
+  template:
+    metadata:
+      labels:
+        app: java-arch-demo
+        arch: arm64
+    spec:
+      # ---- 架构选择：只落在 Graviton (arm64) 节点 ----
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: IMAGE_PLACEHOLDER
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NODE_GROUP
+              value: ng-graviton-c6g
+            - name: NODE_INSTANCE_TYPE
+              value: c6g.xlarge
+          resources:
+            requests:
+              cpu: 300m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

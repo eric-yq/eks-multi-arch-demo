@@ -1,0 +1,104 @@
+# 可选进阶示例：一个 Deployment 同时跑在 x86 与 Graviton 上。
+# 依靠 topologySpreadConstraints 按 kubernetes.io/arch 均匀分布副本，
+# 这也是把存量 x86 负载渐进迁移到 Graviton 的常用做法。
+#
+# 使用前请先删除或缩容 deployment-amd64 / deployment-arm64，避免节点资源不足：
+#   kubectl -n demo delete -f k8s/deployment-amd64.yaml -f k8s/deployment-arm64.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: java-arch-demo-mixed
+  namespace: demo
+  labels:
+    app: java-arch-demo
+    arch: mixed
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: java-arch-demo
+      arch: mixed
+  template:
+    metadata:
+      labels:
+        app: java-arch-demo
+        arch: mixed
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values: ["amd64", "arm64"]
+      # 副本在两种架构之间尽量 1:1 分布
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/arch
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: java-arch-demo
+              arch: mixed
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: IMAGE_PLACEHOLDER
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 300m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

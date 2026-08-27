@@ -1,0 +1,97 @@
+# eksctl 集群配置：一个 EKS 集群 + 两个托管节点组（x86 与 Graviton 各 1 台）
+#
+# 创建命令：
+#   eksctl create cluster -f infra/cluster.yaml
+#
+# 说明：
+#   - ng-x86-c6a      : 1 x c6a.xlarge  (AMD64 / x86_64)
+#   - ng-graviton-c6g : 1 x c6g.xlarge  (ARM64 / Graviton2)
+#   两个节点组都使用 AmazonLinux2023，eksctl 会依据实例类型自动选择 x86_64 / arm64 AMI。
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: multi-arch-demo
+  region: us-east-1
+  version: "1.36"
+  tags:
+    project: eks-multi-arch-demo
+    environment: demo
+
+# 为 IRSA / 插件启用 OIDC provider
+iam:
+  withOIDC: true
+
+# 默认 VPC：3 个可用区（c6a 与 c6g 在这三个 AZ 均可用），公有 + 私有子网 + 单个 NAT 网关
+vpc:
+  nat:
+    gateway: Single
+  clusterEndpoints:
+    publicAccess: true
+    privateAccess: true
+
+availabilityZones:
+  - us-east-1a
+  - us-east-1b
+  - us-east-1c
+
+# 集群插件
+addons:
+  - name: vpc-cni
+    resolveConflicts: overwrite
+  - name: coredns
+    resolveConflicts: overwrite
+  - name: kube-proxy
+    resolveConflicts: overwrite
+  - name: eks-pod-identity-agent
+    resolveConflicts: overwrite
+  - name: metrics-server
+    resolveConflicts: overwrite
+
+managedNodeGroups:
+  # ---------- 节点组 1：x86_64 ----------
+  - name: ng-x86-c6a
+    amiFamily: AmazonLinux2023
+    instanceType: c6a.xlarge
+    desiredCapacity: 1
+    minSize: 1
+    maxSize: 2
+    volumeSize: 50
+    volumeType: gp3
+    privateNetworking: true
+    labels:
+      demo.arch: amd64
+      demo.cpu: intel-amd-x86
+      workload: java-demo
+    tags:
+      nodegroup-arch: amd64
+      nodegroup-instance-type: c6a.xlarge
+    iam:
+      withAddonPolicies:
+        cloudWatch: true
+
+  # ---------- 节点组 2：ARM64 / Graviton ----------
+  - name: ng-graviton-c6g
+    amiFamily: AmazonLinux2023
+    instanceType: c6g.xlarge
+    desiredCapacity: 1
+    minSize: 1
+    maxSize: 2
+    volumeSize: 50
+    volumeType: gp3
+    privateNetworking: true
+    labels:
+      demo.arch: arm64
+      demo.cpu: aws-graviton
+      workload: java-demo
+    tags:
+      nodegroup-arch: arm64
+      nodegroup-instance-type: c6g.xlarge
+    iam:
+      withAddonPolicies:
+        cloudWatch: true
+
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["api", "audit", "authenticator"]
+    logRetentionInDays: 7

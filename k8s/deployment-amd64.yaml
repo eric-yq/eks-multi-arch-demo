@@ -1,0 +1,95 @@
+# 把 Java 服务调度到 x86 节点组（c6a.xlarge）
+# 关键点：nodeSelector 上的 kubernetes.io/arch=amd64 由 kubelet 自动打在节点上，
+# 无需自定义标签即可实现按架构调度。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: java-arch-demo-amd64
+  namespace: demo
+  labels:
+    app: java-arch-demo
+    arch: amd64
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: java-arch-demo
+      arch: amd64
+  template:
+    metadata:
+      labels:
+        app: java-arch-demo
+        arch: amd64
+    spec:
+      # ---- 架构选择：只落在 x86_64 节点 ----
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: IMAGE_PLACEHOLDER
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NODE_GROUP
+              value: ng-x86-c6a
+            - name: NODE_INSTANCE_TYPE
+              value: c6a.xlarge
+          resources:
+            requests:
+              cpu: 300m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

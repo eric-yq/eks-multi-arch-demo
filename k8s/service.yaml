@@ -1,0 +1,17 @@
+# 一个 Service 同时选中 amd64 与 arm64 两组 Pod（selector 只匹配 app 标签），
+# 于是同一个域名的流量会被同时转发到 x86 与 Graviton 节点上的实例。
+apiVersion: v1
+kind: Service
+metadata:
+  name: java-arch-demo
+  namespace: demo
+  labels:
+    app: java-arch-demo
+spec:
+  type: ClusterIP
+  selector:
+    app: java-arch-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

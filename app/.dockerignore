@@ -1,0 +1,9 @@
+# 构建上下文只需要 target 下的 jar
+src/
+.mvn/
+mvnw
+mvnw.cmd
+pom.xml
+target/*
+!target/java-arch-demo.jar
+*.md
