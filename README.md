@@ -290,8 +290,26 @@ kubectl -n demo rollout status deploy/java-arch-demo-arm64
 ./scripts/05-verify.sh
 ```
 
-脚本依次输出：节点架构表 → Pod 落点 → 每个 Pod 容器内 `uname -m` → 通过 Service 访问 10 次的
-架构分布统计 → 两种架构各跑一次 `/api/bench` 的耗时对比。
+脚本依次输出：节点架构表 → Pod 落点（含节点真实架构与实例类型）→ 每个 Pod 容器内 `uname -m` →
+通过 Service 采样 12 次的架构/实例类型分布 → **自动发现所有部署分组**并逐组做 `/api/bench` 对比：
+
+```
+==> 5) 粗略 CPU 对比：3 个分组 × 2000000 次 SHA-256（仅供参考，非正式基准测试）
+   GROUP       INSTANCE-TYPE  OS-ARCH       耗时(ms)          ops/s       相对    vCPU
+   amd64       c6a.xlarge     amd64         148.36     13,481,043     100%       1
+   arm64-c7g   c7g.xlarge     aarch64       191.55     10,441,234      77%       1
+   arm64       c6g.xlarge     aarch64       209.26      9,557,328      71%       1
+```
+
+新增节点组后不用改脚本：分组是从 Pod 的 `arch` 标签自动枚举出来的。
+压测前每组会先跑一轮并丢弃结果——JIT 编译只发生在首次调用，否则"冷"的那一组会明显偏慢
+（实测 c7g 冷跑 250ms、热跑 191ms，不预热会得出 c7g 比 c6g 慢的错误结论）。
+
+> **`arch` 标签 ≠ CPU 架构。** `kubectl get pods -L arch` 里的列打印的是 Pod 标签值
+> （`amd64` / `arm64` / `arm64-c7g`），它只是**部署分组标识**：Deployment 的 `spec.selector`
+> 不可变，各组必须取不同值，否则两个 Deployment 会互相认领对方的 Pod。
+> 真实架构看节点标签 `kubernetes.io/arch`、节点的 `node.kubernetes.io/instance-type`，
+> 或容器里的 `uname -m`——`05-verify.sh` 第 2、3 步会把这几项一起打出来。
 
 手工验证：
 
