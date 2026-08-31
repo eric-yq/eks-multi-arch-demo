@@ -64,7 +64,10 @@ spec:
               cpu: 300m
               memory: 512Mi
             limits:
-              cpu: "1"
+              # 上限给到节点的全部 vCPU（xlarge = 4）：/api/bench 的多线程模式要靠它才能
+              # 打满所有核。如果这里写 1，cgroup 配额会把多线程压回单核，
+              # JVM 的 availableProcessors 也会变成 1。两种架构必须给同样的值才有可比性。
+              cpu: "4"
               memory: 1Gi
           startupProbe:
             httpGet:

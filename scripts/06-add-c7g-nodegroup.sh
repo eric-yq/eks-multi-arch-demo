@@ -95,9 +95,7 @@ POD_IP="$(kubectl -n "${NAMESPACE}" get pod -l "arch=arm64" \
   -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)"
 if [[ -n "${POD_IP}" ]]; then
   log "直接访问 Graviton 上的 Pod：/api/info"
-  kubectl -n "${NAMESPACE}" run c7g-probe --rm -i --restart=Never --quiet \
-    --image="${PROBE_IMAGE}" --command -- \
-    sh -c "wget -qO- http://${POD_IP}:8080/api/info; echo" \
+  run_probe c7g-probe "wget -qO- http://${POD_IP}:8080/api/info; echo" \
     || warn "采样失败（Pod 可能还在启动）"
 fi
 

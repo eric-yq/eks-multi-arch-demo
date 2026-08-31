@@ -13,7 +13,7 @@
 
   <groupId>com.example</groupId>
   <artifactId>java-arch-demo</artifactId>
-  <version>1.0.0</version>
+  <version>1.1.0</version>
   <name>java-arch-demo</name>
   <description>Multi-arch (amd64 / aarch64) Java demo for Amazon EKS</description>
 

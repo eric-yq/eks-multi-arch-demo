@@ -8,7 +8,7 @@ export AWS_DEFAULT_REGION="${AWS_REGION}"
 export CLUSTER_NAME="${CLUSTER_NAME:-multi-arch-demo}"
 export NAMESPACE="${NAMESPACE:-demo}"
 export ECR_REPO="${ECR_REPO:-java-arch-demo}"
-export IMAGE_TAG="${IMAGE_TAG:-1.0.0}"
+export IMAGE_TAG="${IMAGE_TAG:-1.1.0}"
 export PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 export BUILDER_NAME="${BUILDER_NAME:-multiarch-builder}"
 export JAR_NAME="${JAR_NAME:-java-arch-demo.jar}"
@@ -53,6 +53,29 @@ resolve_image_uri() {
   # 单架构 tag：<repo>:<tag>-amd64 / <repo>:<tag>-arm64
   export IMAGE_URI_AMD64="${IMAGE_REPO_URI}:${IMAGE_TAG}-amd64"
   export IMAGE_URI_ARM64="${IMAGE_REPO_URI}:${IMAGE_TAG}-arm64"
+}
+
+# 在集群内跑一个一次性探针 Pod 并取回完整输出。
+# 不用 `kubectl run --rm -i`：那种写法要 attach 容器，容器启动/退出与 attach 存在竞争，
+# 会出现 "couldn't attach to pod ... falling back to streaming logs"，并可能丢掉开头几行输出。
+# 这里改成：创建 Pod → 等它跑完 → kubectl logs 取输出 → 删除。
+run_probe() {
+  local name="$1" cmd="$2" phase=""
+  local image="${PROBE_IMAGE:-public.ecr.aws/docker/library/alpine:3.22}"
+
+  kubectl -n "${NAMESPACE}" delete pod "${name}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+  kubectl -n "${NAMESPACE}" run "${name}" --restart=Never --image="${image}" \
+    --command -- sh -c "${cmd}" >/dev/null || { warn "探针 Pod ${name} 创建失败"; return 1; }
+
+  for _ in $(seq 1 90); do
+    phase="$(kubectl -n "${NAMESPACE}" get pod "${name}" -o jsonpath='{.status.phase}' 2>/dev/null || echo '')"
+    [[ "${phase}" == "Succeeded" || "${phase}" == "Failed" ]] && break
+    sleep 2
+  done
+
+  kubectl -n "${NAMESPACE}" logs "${name}" 2>/dev/null || warn "读取 ${name} 日志失败"
+  kubectl -n "${NAMESPACE}" delete pod "${name}" --wait=false >/dev/null 2>&1 || true
+  [[ "${phase}" == "Succeeded" ]] || warn "探针 Pod ${name} 未正常结束（phase=${phase:-unknown}）"
 }
 
 is_ecr_registry() { [[ "${REGISTRY_HOST:-}" == *.amazonaws.com ]]; }

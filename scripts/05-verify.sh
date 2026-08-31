@@ -15,27 +15,6 @@ PROBE_IMAGE="${PROBE_IMAGE:-public.ecr.aws/docker/library/alpine:3.22}"
 BENCH_ITERATIONS="${BENCH_ITERATIONS:-2000000}"
 APP_SELECTOR="app=java-arch-demo"
 
-# 在集群内跑一个一次性探针 Pod 并取回输出。
-# 不用 `kubectl run --rm -i`：那种写法要 attach 容器，容器启动/退出与 attach 存在竞争，
-# 会出现 "couldn't attach to pod ... falling back to streaming logs" 并可能丢掉开头几行输出。
-# 这里改成：创建 Pod → 等它跑完 → kubectl logs 取完整输出 → 删除。
-run_probe() {
-  local name="$1" cmd="$2" phase=""
-  kubectl -n "${NAMESPACE}" delete pod "${name}" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-  kubectl -n "${NAMESPACE}" run "${name}" --restart=Never --image="${PROBE_IMAGE}" \
-    --command -- sh -c "${cmd}" >/dev/null || { warn "探针 Pod ${name} 创建失败"; return 1; }
-
-  for _ in $(seq 1 90); do
-    phase="$(kubectl -n "${NAMESPACE}" get pod "${name}" -o jsonpath='{.status.phase}' 2>/dev/null || echo '')"
-    [[ "${phase}" == "Succeeded" || "${phase}" == "Failed" ]] && break
-    sleep 2
-  done
-
-  kubectl -n "${NAMESPACE}" logs "${name}" 2>/dev/null || warn "读取 ${name} 日志失败"
-  kubectl -n "${NAMESPACE}" delete pod "${name}" --wait=false >/dev/null 2>&1 || true
-  [[ "${phase}" == "Succeeded" ]] || warn "探针 Pod ${name} 未正常结束（phase=${phase:-unknown}）"
-}
-
 log "1) 节点架构与实例类型"
 kubectl get nodes \
   -L kubernetes.io/arch,node.kubernetes.io/instance-type,eks.amazonaws.com/nodegroup
@@ -97,58 +76,93 @@ else
   if [[ "${#targets[@]}" -eq 0 ]]; then
     warn "5) 没有找到运行中的 Pod，跳过 CPU 对比"
   else
-    log "5) 粗略 CPU 对比：${#targets[@]} 个分组 × ${BENCH_ITERATIONS} 次 SHA-256（仅供参考，非正式基准测试）"
+    log "5) 粗略 CPU 对比：${#targets[@]} 个分组，每线程 ${BENCH_ITERATIONS} 次 SHA-256（仅供参考，非正式基准测试）"
+    echo "   两种口径分别测：threads=1 看单核性能，threads=<容器可见 vCPU> 看整机吞吐"
 
-    # 在一个探针 Pod 里依次压测每个分组，输出 "分组|实例类型|JSON" 便于解析。
-    # 每组先跑一次丢弃结果：JIT 编译只在首次调用时发生，否则"冷"的那一组会明显偏慢。
+    # 在一个探针 Pod 里依次压测每个分组，输出 "分组|实例类型|口径|JSON" 便于解析。
+    # 每种口径都先跑一次丢弃结果：JIT 编译只在首次调用时发生，否则"冷"的那一组会明显偏慢。
     probe_cmd=""
     for t in "${targets[@]}"; do
       IFS='|' read -r group itype ip _pod <<<"${t}"
-      probe_cmd+="wget -qO- 'http://${ip}:8080/api/bench?iterations=${BENCH_ITERATIONS}' >/dev/null 2>&1; "
-      probe_cmd+="printf '%s|%s|' '${group}' '${itype}'; "
-      probe_cmd+="wget -qO- 'http://${ip}:8080/api/bench?iterations=${BENCH_ITERATIONS}' || echo '{}'; echo; "
+      for mode in single multi; do
+        # threads=1 走单核；threads 不传时服务端取 availableProcessors，即容器可见的全部核
+        query="iterations=${BENCH_ITERATIONS}"
+        [[ "${mode}" == "single" ]] && query="${query}&threads=1"
+        probe_cmd+="wget -qO- 'http://${ip}:8080/api/bench?${query}' >/dev/null 2>&1; "
+        probe_cmd+="printf '%s|%s|%s|' '${group}' '${itype}' '${mode}'; "
+        probe_cmd+="wget -qO- 'http://${ip}:8080/api/bench?${query}' || echo '{}'; echo; "
+      done
     done
 
     bench_raw="$(run_probe bench-probe "${probe_cmd}" || true)"
 
     if command -v python3 >/dev/null 2>&1; then
       printf '%s\n' "${bench_raw}" | python3 -c '
-import json, re, sys
+import json, sys
 
-rows = []
+rows = {"single": [], "multi": []}
 for line in sys.stdin:
-    parts = line.strip().split("|", 2)
-    if len(parts) != 3 or not parts[2].startswith("{"):
+    parts = line.strip().split("|", 3)
+    if len(parts) != 4 or not parts[3].startswith("{"):
         continue
-    group, itype, payload = parts
+    group, itype, mode, payload = parts
     try:
         d = json.loads(payload)
     except json.JSONDecodeError:
         continue
-    if "opsPerSecond" not in d:
+    if "opsPerSecond" not in d or mode not in rows:
         continue
-    rows.append({
+    rows[mode].append({
         "group": group,
         "itype": itype,
         "arch": d.get("osArch", "?"),
         "ms": d.get("elapsedMillis", 0),
         "ops": d.get("opsPerSecond", 0),
+        "threads": d.get("threads", "?"),
         "cpus": d.get("availableProcessors", "?"),
-        "pod": d.get("podName", "?"),
     })
 
-if not rows:
+if not any(rows.values()):
     sys.exit("   压测结果解析失败，原始输出见上方")
 
-best = max(r["ops"] for r in rows) or 1
-print("   {:<11} {:<14} {:<9} {:>10} {:>14} {:>8} {:>7}".format(
-    "GROUP", "INSTANCE-TYPE", "OS-ARCH", "耗时(ms)", "ops/s", "相对", "vCPU"))
-for r in sorted(rows, key=lambda x: -x["ops"]):
-    print("   {:<11} {:<14} {:<9} {:>10} {:>14,} {:>7.0f}% {:>7}".format(
-        r["group"], r["itype"], r["arch"], r["ms"], r["ops"],
-        r["ops"] / best * 100, r["cpus"]))
-print("   注：单线程负载，每组已先跑一轮丢弃以排除 JIT 预热；")
-print("       vCPU 是容器可见核数（受 limits.cpu 限制），各组一致才有可比性。")
+HEAD = "   {:<11} {:<14} {:<9} {:>8} {:>10} {:>14} {:>8}"
+ROW = "   {:<11} {:<14} {:<9} {:>8} {:>10} {:>14,} {:>7.0f}%"
+
+def table(title, items, note):
+    if not items:
+        return
+    print()
+    print("   " + title)
+    print(HEAD.format("GROUP", "INSTANCE-TYPE", "OS-ARCH", "THREADS", "耗时(ms)", "ops/s", "相对"))
+    best = max(i["ops"] for i in items) or 1
+    for i in sorted(items, key=lambda x: -x["ops"]):
+        print(ROW.format(i["group"], i["itype"], i["arch"], i["threads"], i["ms"],
+                         i["ops"], i["ops"] / best * 100))
+    print("   " + note)
+
+table("单核（threads=1）—— 反映单线程标量性能", rows["single"],
+      "x86 单核主频高，这一口径通常 x86 领先。")
+table("多核（threads = 容器可见 vCPU）—— 反映整机吞吐", rows["multi"],
+      "Graviton 的 vCPU 是物理核（无 SMT），x86 的 4 vCPU 通常是 2 物理核 + 超线程。")
+
+# 每组的多核加速比：能直观看出 SMT 与物理核的差别
+single = {i["group"]: i for i in rows["single"]}
+scale = [(g, m, single[g]) for g in single for m in rows["multi"] if m["group"] == g]
+if scale:
+    print()
+    print("   多核加速比（多核 ops/s ÷ 单核 ops/s，理想值 = 线程数）")
+    print("   {:<11} {:<14} {:>8} {:>12} {:>10}".format(
+        "GROUP", "INSTANCE-TYPE", "THREADS", "加速比", "效率"))
+    for group, multi, one in scale:
+        ratio = multi["ops"] / one["ops"] if one["ops"] else 0
+        threads = multi["threads"] if isinstance(multi["threads"], int) else 1
+        print("   {:<11} {:<14} {:>8} {:>11.2f}x {:>9.0f}%".format(
+            group, multi["itype"], multi["threads"], ratio,
+            ratio / threads * 100 if threads else 0))
+
+print()
+print("   注：每种口径都先跑一轮丢弃以排除 JIT 预热；容器 limits.cpu 必须给到全部 vCPU，")
+print("       否则 cgroup 配额会把多线程压回单核（各组的 limits 必须一致才有可比性）。")
 ' || printf '%s\n' "${bench_raw}"
     else
       printf '%s\n' "${bench_raw}"

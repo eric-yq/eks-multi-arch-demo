@@ -73,7 +73,8 @@ spec:
               cpu: 300m
               memory: 512Mi
             limits:
-              cpu: "1"
+              # 与 amd64 侧保持完全一致，否则多核对比不成立（见 deployment-amd64.yaml 的说明）
+              cpu: "4"
               memory: 1Gi
           startupProbe:
             httpGet:

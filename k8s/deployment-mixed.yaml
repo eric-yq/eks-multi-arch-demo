@@ -73,7 +73,7 @@ spec:
               cpu: 300m
               memory: 512Mi
             limits:
-              cpu: "1"
+              cpu: "4"
               memory: 1Gi
           startupProbe:
             httpGet:
