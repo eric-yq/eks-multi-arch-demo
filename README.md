@@ -55,7 +55,8 @@
     ├── 03b-create-manifest-list.sh # 方式 B：把两个单架构 tag 合并成多架构 tag
     ├── 04-deploy.sh                # 只部署到 x86 节点组
     ├── 05-verify.sh                # 步骤 4 后 / 步骤 6 后都可以跑
-    ├── 06-add-c7g-nodegroup.sh     # 增量：加 Graviton 节点组 + 部署同一个镜像
+    ├── 06a-add-c7g-nodegroup.sh    # 增量①：只加 Graviton 节点组（不动业务）
+    ├── 06b-deploy-java-arm64.sh    # 增量②：把同一个镜像部署到 Graviton
     ├── 07a-build-push-polyglot-native.sh  # 多语言镜像：在本机架构上原生构建并推送
     ├── 07b-create-polyglot-manifest.sh    # 多语言镜像：合并成多架构 tag
     ├── 08-deploy-polyglot.sh       # 多语言服务：部署到两种架构并对比
@@ -359,17 +360,31 @@ kubectl -n demo get svc java-arch-demo-nlb -w    # 等 EXTERNAL-IP
 这是给客户看的核心动作：**存量 x86 集群不动，只加一个节点组 + 改一行 nodeSelector**，
 业务就跑在 Graviton 上了。
 
+拆成两个脚本，方便在客户面前把因果分开演示：
+
 ```bash
-./scripts/06-add-c7g-nodegroup.sh
+./scripts/06a-add-c7g-nodegroup.sh    # ① 只加节点组，业务不动
+./scripts/05-verify.sh                # 可选：此时 Graviton 节点是空的，Pod 还全在 x86
+./scripts/06b-deploy-java-arm64.sh    # ② 同一个镜像 tag 部署上去，Pod 落到 Graviton
 ```
 
-脚本按顺序做四件事，全程幂等（节点组 / Deployment 已存在则跳过创建、只做滚动更新）：
+**6a 只加节点组**（不需要镜像，也不需要 ECR 权限）：
 
-1. 先打印改造前的节点与 Pod 分布（现场对照用）
-2. `eksctl create nodegroup -f infra/nodegroup-c7g.yaml` 创建 Graviton 节点组（约 3~5 分钟），
-   然后等节点带上 `eks.amazonaws.com/nodegroup=ng-graviton-c7g` 并 Ready
+1. 打印改造前的节点与 Pod 分布，现场对照用
+2. `eksctl create nodegroup -f infra/nodegroup-c7g.yaml` 创建节点组（约 3~5 分钟）
+3. 等节点带上 `eks.amazonaws.com/nodegroup=ng-graviton-c7g` 并 Ready
+4. 再打印一次分布——新节点已就绪但上面没有任何业务 Pod，这一步的"空窗"是演示的关键画面
+
+**6b 只部署业务**：
+
+1. 先确认集群里有 arm64 节点，没有就提示先跑 6a
+2. 节点组名与实例类型从 arm64 节点的标签自动读取（填进 `/api/info` 的展示字段），
+   也可用 `C7G_NODEGROUP` / `C7G_INSTANCE_TYPE` 覆盖
 3. 用**同一个镜像 tag** 部署 `k8s/deployment-arm64.yaml`，并重新 apply Service
-4. 验证：节点表、新 Pod 落点、容器内 `uname -m`、`/api/info` 采样、两个节点组的 Pod 分布
+4. 验证：新 Pod 落点、容器内 `uname -m`、`/api/info` 采样、两个节点组的 Pod 分布
+
+两个脚本都幂等，重复执行只会做就绪检查或滚动更新。
+如果集群里存在多个 arm64 节点组，6b 会告警提示 `nodeSelector` 只按架构选、Pod 可能落到任意一个。
 
 两个 Deployment 逐字对比只有一处不同：
 
@@ -401,11 +416,11 @@ kubectl -n demo rollout status deploy/java-arch-demo-arm64
 
 ```bash
 # 换节点组名（记得同步改 infra/nodegroup-c7g.yaml 里的 name）
-C7G_NODEGROUP=my-ng ./scripts/06-add-c7g-nodegroup.sh
+C7G_NODEGROUP=my-ng ./scripts/06a-add-c7g-nodegroup.sh
 
 # 改用 Graviton2 (c6g)：复制一份 infra/nodegroup-c7g.yaml 改名字与 instanceType，然后
 NODEGROUP_FILE=infra/nodegroup-c6g.yaml C7G_NODEGROUP=ng-graviton-c6g \
-  C7G_INSTANCE_TYPE=c6g.xlarge ./scripts/06-add-c7g-nodegroup.sh
+  C7G_INSTANCE_TYPE=c6g.xlarge ./scripts/06a-add-c7g-nodegroup.sh
 ```
 
 选型参考（us-east-1 按需，已核对 Pricing API）：`c6a.xlarge` $0.153/小时、
@@ -552,7 +567,8 @@ eksctl delete nodegroup --cluster multi-arch-demo --region us-east-1 --name ng-g
 
 # 3) 按新流程演示
 ./scripts/04-deploy.sh                # 改造前：只有 x86
-./scripts/06-add-c7g-nodegroup.sh     # 改造后：加 Graviton 并部署
+./scripts/06a-add-c7g-nodegroup.sh    # 改造后①：加 Graviton 节点组
+./scripts/06b-deploy-java-arm64.sh    # 改造后②：部署同一个镜像
 ```
 
 注意 `java-arch-demo-arm64` 的 Deployment selector 在新旧版本里都是 `{app, arch: arm64}`，

@@ -2,7 +2,7 @@
 #
 # 这是一个"只含节点组"的 eksctl 配置：metadata 必须与已存在的集群一致。
 # 创建命令：
-#   ./scripts/06-add-c7g-nodegroup.sh
+#   ./scripts/06a-add-c7g-nodegroup.sh
 #   （等价：eksctl create nodegroup -f infra/nodegroup-c7g.yaml）
 #
 # 为什么单独一个文件：eksctl create cluster 不支持 --include 过滤节点组，
@@ -10,7 +10,7 @@
 # 这个 demo 需要的恰恰是"先只有 x86，后面再加 Graviton"。
 #
 # 想换成 Graviton2 做对比：把 name 改成 ng-graviton-c6g、instanceType 改成 c6g.xlarge，
-# 然后 C7G_NODEGROUP=ng-graviton-c6g NODEGROUP_FILE=infra/nodegroup-c6g.yaml ./scripts/06-add-c7g-nodegroup.sh
+# 然后 C7G_NODEGROUP=ng-graviton-c6g NODEGROUP_FILE=infra/nodegroup-c6g.yaml ./scripts/06a-add-c7g-nodegroup.sh
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
 

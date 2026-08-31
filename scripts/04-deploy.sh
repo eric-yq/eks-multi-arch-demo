@@ -2,7 +2,7 @@
 # 步骤 4：把 Java 服务部署到 **x86 节点组**（此时集群里只有 x86 节点）
 #
 # 这一步对应客户现状：一个纯 x86 的 EKS 集群，服务跑在 x86 节点上。
-# Graviton 节点组与对应的 Pod 是后面的增量步骤：./scripts/06-add-c7g-nodegroup.sh
+# Graviton 节点组与对应的 Pod 是后面的增量步骤：./scripts/06a-add-c7g-nodegroup.sh
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 
@@ -31,6 +31,7 @@ cat <<EOF
 完成。当前状态：集群只有 x86 节点组，服务只跑在 x86 节点上。
 
 下一步：
-  ./scripts/05-verify.sh              # 验证现状
-  ./scripts/06-add-c7g-nodegroup.sh   # 增量：新增 Graviton 节点组并把同一个镜像部署上去
+  ./scripts/05-verify.sh                # 验证现状（此时只有 amd64 一组）
+  ./scripts/06a-add-c7g-nodegroup.sh    # 增量第一步：只新增 Graviton 节点组
+  ./scripts/06b-deploy-java-arm64.sh    # 增量第二步：把同一个镜像部署到 Graviton
 EOF
