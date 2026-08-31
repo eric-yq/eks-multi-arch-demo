@@ -13,10 +13,16 @@ export PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 export BUILDER_NAME="${BUILDER_NAME:-multiarch-builder}"
 export JAR_NAME="${JAR_NAME:-java-arch-demo.jar}"
 
+# ---- 多语言（Go / Python / C++）服务，独立镜像与独立 ECR 仓库 ----
+export POLYGLOT_ECR_REPO="${POLYGLOT_ECR_REPO:-polyglot-arch-demo}"
+export POLYGLOT_IMAGE_TAG="${POLYGLOT_IMAGE_TAG:-1.0.0}"
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export REPO_ROOT
 export APP_DIR="${REPO_ROOT}/app"
+export POLYGLOT_DIR="${REPO_ROOT}/polyglot"
 export K8S_DIR="${REPO_ROOT}/k8s"
+export POLYGLOT_K8S_DIR="${REPO_ROOT}/k8s/polyglot"
 export BUILD_DIR="${REPO_ROOT}/.build"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -80,18 +86,73 @@ run_probe() {
 
 is_ecr_registry() { [[ "${REGISTRY_HOST:-}" == *.amazonaws.com ]]; }
 
-# 幂等创建 ECR 仓库
+# 解析多语言服务的镜像地址（与 Java 服务分开，不同 ECR 仓库）
+resolve_polyglot_image_uri() {
+  if [[ -n "${POLYGLOT_IMAGE_URI:-}" ]]; then
+    export POLYGLOT_IMAGE_REPO_URI="${POLYGLOT_IMAGE_URI%:*}"
+  else
+    need aws
+    AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
+    [[ -n "${AWS_ACCOUNT_ID}" && "${AWS_ACCOUNT_ID}" != "None" ]] || die "无法获取 AWS 账号 ID，请检查 AWS 凭证"
+    export AWS_ACCOUNT_ID
+    export ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    export POLYGLOT_IMAGE_REPO_URI="${ECR_REGISTRY}/${POLYGLOT_ECR_REPO}"
+    export POLYGLOT_IMAGE_URI="${POLYGLOT_IMAGE_REPO_URI}:${POLYGLOT_IMAGE_TAG}"
+  fi
+  export REGISTRY_HOST="${POLYGLOT_IMAGE_URI%%/*}"
+  export ECR_REGISTRY="${ECR_REGISTRY:-${REGISTRY_HOST}}"
+  export POLYGLOT_IMAGE_URI_AMD64="${POLYGLOT_IMAGE_REPO_URI}:${POLYGLOT_IMAGE_TAG}-amd64"
+  export POLYGLOT_IMAGE_URI_ARM64="${POLYGLOT_IMAGE_REPO_URI}:${POLYGLOT_IMAGE_TAG}-arm64"
+}
+
+# 幂等创建 ECR 仓库。用法：ensure_ecr_repo [仓库名]，默认 ${ECR_REPO}
 ensure_ecr_repo() {
+  local repo="${1:-${ECR_REPO}}"
   is_ecr_registry || { log "非 ECR registry（${REGISTRY_HOST}），跳过仓库创建"; return 0; }
   need aws
-  if aws ecr describe-repositories --repository-names "${ECR_REPO}" --region "${AWS_REGION}" >/dev/null 2>&1; then
-    log "ECR 仓库已存在：${ECR_REPO}"
+  if aws ecr describe-repositories --repository-names "${repo}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+    log "ECR 仓库已存在：${repo}"
   else
-    log "创建 ECR 仓库：${ECR_REPO}"
+    log "创建 ECR 仓库：${repo}"
     aws ecr create-repository \
-      --repository-name "${ECR_REPO}" \
+      --repository-name "${repo}" \
       --region "${AWS_REGION}" \
       --image-scanning-configuration scanOnPush=true >/dev/null
+  fi
+}
+
+# 把两个单架构 tag 合并成一个多架构 tag（manifest list）
+# 用法：create_manifest_list <多架构tag> <amd64 tag> <arm64 tag>
+create_manifest_list() {
+  local target="$1" amd64_tag="$2" arm64_tag="$3"
+  local manifest_args=()
+  [[ "${INSECURE_REGISTRY:-false}" == "true" ]] && manifest_args+=(--insecure)
+
+  local has_buildx=false
+  docker buildx version >/dev/null 2>&1 && has_buildx=true
+
+  local missing=0 tag
+  for tag in "${amd64_tag}" "${arm64_tag}"; do
+    if { [[ "${has_buildx}" == "true" ]] && docker buildx imagetools inspect "${tag}" >/dev/null 2>&1; } \
+       || { [[ "${has_buildx}" != "true" ]] && docker manifest inspect "${manifest_args[@]}" "${tag}" >/dev/null 2>&1; }; then
+      printf '   [ok]      %s\n' "${tag}"
+    else
+      printf '   [missing] %s\n' "${tag}"
+      missing=1
+    fi
+  done
+  [[ "${missing}" -eq 0 ]] || return 1
+
+  if [[ "${has_buildx}" == "true" ]]; then
+    docker buildx imagetools create -t "${target}" "${amd64_tag}" "${arm64_tag}"
+    docker buildx imagetools inspect "${target}"
+  else
+    docker manifest rm "${target}" >/dev/null 2>&1 || true
+    docker manifest create "${manifest_args[@]}" "${target}" \
+      --amend "${amd64_tag}" --amend "${arm64_tag}"
+    docker manifest push "${manifest_args[@]}" "${target}"
+    docker manifest inspect "${manifest_args[@]}" "${target}" \
+      | grep -E '"architecture"|"os"' | sed 's/^[[:space:]]*/   /'
   fi
 }
 

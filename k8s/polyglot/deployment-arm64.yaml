@@ -1,0 +1,97 @@
+# 多语言服务（Go / Python / C++）部署到 Graviton 节点组
+#
+# 与 Java 服务完全独立：不同的 app 标签、不同的 Service、不同的 ECR 仓库，
+# 两套 demo 可以同时存在于 demo 命名空间里互不干扰。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: polyglot-demo-arm64
+  namespace: demo
+  labels:
+    app: polyglot-arch-demo
+    arch: arm64
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: polyglot-arch-demo
+      arch: arm64
+  template:
+    metadata:
+      labels:
+        app: polyglot-arch-demo
+        arch: arm64
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: IMAGE_PLACEHOLDER
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NODE_GROUP
+              value: NODEGROUP_PLACEHOLDER
+            - name: NODE_INSTANCE_TYPE
+              value: INSTANCE_TYPE_PLACEHOLDER
+          resources:
+            requests:
+              cpu: 300m
+              memory: 256Mi
+            limits:
+              # 与 amd64 侧保持一致；多线程压测要靠这个上限才能打满全部 vCPU，
+              # Go 侧会按 cgroup 配额自动设置 GOMAXPROCS
+              cpu: "4"
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

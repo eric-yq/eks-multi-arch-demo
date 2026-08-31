@@ -1,0 +1,17 @@
+# 一个 Service 同时选中 amd64 与 arm64 两组多语言 Pod。
+# 与 Java 服务的 Service（java-arch-demo）完全独立。
+apiVersion: v1
+kind: Service
+metadata:
+  name: polyglot-arch-demo
+  namespace: demo
+  labels:
+    app: polyglot-arch-demo
+spec:
+  type: ClusterIP
+  selector:
+    app: polyglot-arch-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

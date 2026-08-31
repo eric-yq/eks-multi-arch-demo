@@ -33,13 +33,19 @@
 │       ├── ArchInfoService.java    # 采集 os.arch / JVM / Pod / Node 信息
 │       ├── ArchInfoController.java # GET /  与  GET /api/info
 │       └── BenchmarkController.java# GET /api/bench  简易 CPU 对比
+├── polyglot/                       # 第二个 demo 服务：Go + Python + C++ 单镜像
+│   ├── Dockerfile                  # 原生多阶段构建（每种架构各构建一次，无需 QEMU）
+│   ├── go/                         # HTTP 前门 + Go 压测 + cgroup CPU 识别
+│   ├── python/bench.py             # Python 压测（多进程绕开 GIL）
+│   └── cpp/bench.cpp               # C++ 压测（OpenSSL EVP，必须按架构编译）
 ├── k8s/
 │   ├── 00-namespace.yaml
 │   ├── deployment-amd64.yaml       # 步骤 4：nodeSelector kubernetes.io/arch=amd64
 │   ├── deployment-arm64.yaml       # 步骤 6：nodeSelector kubernetes.io/arch=arm64
 │   ├── deployment-mixed.yaml       # 进阶：一个 Deployment 跨两种架构均匀分布
 │   ├── service.yaml                # ClusterIP，同时选中两组 Pod
-│   └── service-nlb.yaml            # 可选：对外暴露（会创建 NLB）
+│   ├── service-nlb.yaml            # 可选：对外暴露（会创建 NLB）
+│   └── polyglot/                   # 多语言服务的 Deployment 与 Service
 └── scripts/
     ├── env.sh                      # 共享变量与工具函数（AWS_REGION / CLUSTER_NAME / IMAGE_TAG ...）
     ├── 01-create-cluster.sh
@@ -50,6 +56,9 @@
     ├── 04-deploy.sh                # 只部署到 x86 节点组
     ├── 05-verify.sh                # 步骤 4 后 / 步骤 6 后都可以跑
     ├── 06-add-c7g-nodegroup.sh     # 增量：加 Graviton 节点组 + 部署同一个镜像
+    ├── 07a-build-push-polyglot-native.sh  # 多语言镜像：在本机架构上原生构建并推送
+    ├── 07b-create-polyglot-manifest.sh    # 多语言镜像：合并成多架构 tag
+    ├── 08-deploy-polyglot.sh       # 多语言服务：部署到两种架构并对比
     └── 90-cleanup.sh
 
 bench/                              # 独立工具：容器启动耗时基准，见 bench/README.md
@@ -404,10 +413,96 @@ NODEGROUP_FILE=infra/nodegroup-c6g.yaml C7G_NODEGROUP=ng-graviton-c6g \
 实测同一份 jar 的单核 SHA-256 吞吐约为 c6a 的 77%、比 c6g 高约 9%——
 真实业务请用自己的负载压测后再定型号。
 
+## 步骤 7~8（可选）：多语言服务（Go / Python / C++）
+
+第二个 demo 服务，一个镜像里装了三种语言的实现，与 Java 服务**完全独立**
+（不同 ECR 仓库、不同 Service、不同 app 标签，可以同时部署在 `demo` 命名空间里）。
+
+它存在的意义是把"迁移 Graviton 时不同语言的工作量差异"变成可演示的事实：
+
+| 语言 | 产物 | 换架构要做什么 |
+| --- | --- | --- |
+| Java | jar（架构无关字节码） | 什么都不用做，一份产物通吃 |
+| Python | .py 源码（解释执行） | 源码不用改，但要留意带原生扩展的依赖（wheel 是否有 aarch64 版） |
+| Go | 原生二进制 | 必须为每种架构编译一次（交叉编译很容易，`GOARCH` 即可） |
+| C++ | 原生二进制 | 必须为每种架构编译一次，且依赖库（本例 OpenSSL）也要对应架构 |
+
+因此这个镜像采用**在对应架构的实例上原生构建**：
+
+```
+x86 实例 (c6a)      docker build → push  <repo>:1.0.0-amd64  ┐
+                                                              ├─→ 合并 → <repo>:1.0.0
+Graviton 实例 (c7g) docker build → push  <repo>:1.0.0-arm64  ┘
+```
+
+原生构建的好处：不需要 buildx、不需要 QEMU 模拟，编译速度就是本机速度，
+编译期的架构相关优化也按真实硬件生效。
+
+### 7a. 两台机器各自原生构建并推送
+
+在 **x86 实例**上：
+
+```bash
+git clone <this-repo> && cd eks-multi-arch-demo
+./scripts/07a-build-push-polyglot-native.sh     # 自动识别 uname -m → 推 :1.0.0-amd64
+```
+
+在 **Graviton 实例**上执行同一条命令，脚本会推 `:1.0.0-arm64`。
+脚本会在推送后进镜像里自检，打印容器内的 `uname -m` 与三种语言的运行时版本。
+
+### 7b. 合并成多架构 tag
+
+```bash
+./scripts/07b-create-polyglot-manifest.sh
+# 等价：docker buildx imagetools create -t <repo>:1.0.0 <repo>:1.0.0-amd64 <repo>:1.0.0-arm64
+```
+
+### 8. 部署并对比
+
+```bash
+./scripts/08-deploy-polyglot.sh
+```
+
+部署到 x86 与 Graviton 两个节点组，然后用同一个负载（SHA-256 循环，四种语言的实现逻辑一致）
+按语言分组对比两种架构。接口：
+
+| 路径 | 用途 |
+| --- | --- |
+| `GET /` | 纯文本：架构、容器可用核数、三种语言的运行时版本、Pod/Node 信息 |
+| `GET /api/info` | 同样信息的 JSON |
+| `GET /api/bench?lang=all` | 三种语言各跑一遍，`lang` 也可取 `go` / `python` / `cpp` |
+| `GET /api/bench?lang=cpp&threads=1&iterations=2000000` | 指定语言、线程数、每线程迭代次数 |
+| `GET /healthz`、`GET /readyz` | 探针 |
+
+架构：Go 进程做 HTTP 前门，Python 与 C++ 以子进程方式调用（各自计时并输出 JSON，
+所以进程启动开销不算进 `elapsedMillis`，而是单独报在 `spawnMillis` 里）。
+
+实测参考（同一台 c6a.xlarge，每线程 100 万次，容器 `limits.cpu: 4`）：
+
+| 语言 | 单线程 ops/s | 4 线程聚合 ops/s | 并发方式 |
+| --- | --- | --- | --- |
+| C++ | 12,710,958 | 28,456,824 | `std::thread` |
+| Go | 11,934,966 | 43,022,256 | goroutine，GOMAXPROCS 按 cgroup 配额设置 |
+| Python | 1,313,848 | 2,993,426 | 多进程（GIL 限制，线程无法并行纯计算） |
+
+三个和这个服务有关的工程细节，演示时值得点出来：
+
+- **Go 默认不认 cgroup 配额**。`runtime.NumCPU()` 读的是宿主机核数，容器里会超配 P 的数量。
+  服务启动时会读 `/sys/fs/cgroup/cpu.max` 算出真实可用核数并设置 `GOMAXPROCS`，
+  `/api/info` 里 `hostCPUs` 与 `containerCPUs` 两个值可以直接对比。
+- **Python 的 GIL**。`threads>1` 时用 `multiprocessing` 而不是线程，否则纯计算跑不满多核——
+  这在核数更多的 Graviton 实例上尤其明显。
+- **OpenSSL 3.x 的调用方式对 C++ 性能影响巨大**。用 `EVP_MD_fetch` 取一次算法并复用是
+  12.7M ops/s；如果每次循环把静态 `EVP_sha256()` 传给 `EVP_DigestInit_ex`（每次触发 provider 查找）
+  只有 2.9M ops/s，legacy `SHA256()` 更慢（2.6M）。这类问题和架构无关，
+  但容易在架构对比里被误读成"某个架构慢"。
+
+清理：`kubectl -n demo delete -f k8s/polyglot/`（或直接删命名空间）。
+
 ## 清理
 
 ```bash
-# 只删 k8s 资源
+# 只删 k8s 资源（Java 与多语言两个服务都在 demo 命名空间里）
 ./scripts/90-cleanup.sh
 
 # 只删 c7g 节点组，保留集群与其他节点组
