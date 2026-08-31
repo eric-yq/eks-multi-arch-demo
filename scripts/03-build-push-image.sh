@@ -52,4 +52,4 @@ log "校验 manifest list（应同时出现 linux/amd64 与 linux/arm64）"
 docker buildx imagetools inspect "${IMAGE_URI}"
 
 log "镜像地址：${IMAGE_URI}"
-log "下一步：./scripts/04-deploy.sh"
+log "下一步：./scripts/04a-deploy-java-amd64.sh"

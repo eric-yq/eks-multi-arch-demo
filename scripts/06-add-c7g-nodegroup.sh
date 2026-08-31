@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 步骤 6a（增量演示，第一步）：在已有的 **纯 x86** 集群上新增一个 Graviton 节点组
-#                              （1 x c7g.xlarge）。只加节点，不动任何业务负载。
+# 步骤 6（增量演示）：在已有的 **纯 x86** 集群上新增一个 Graviton 节点组
+#                    （1 x c7g.xlarge）。只加节点，不动任何业务负载。
 #
-# 拆成两步是为了在客户面前把因果讲清楚：
-#   6a 只加节点组 → 此时 Graviton 节点是空的，业务还全在 x86 上
-#   6b 部署业务   → 同一个镜像 tag，只改 nodeSelector，Pod 就落到 Graviton 上
+# 加节点组与部署业务分成两个脚本，是为了在客户面前把因果讲清楚：
+#   06  只加节点组 → 此时 Graviton 节点是空的，业务还全在 x86 上
+#   04b 部署业务   → 同一个镜像 tag，只改 nodeSelector，Pod 就落到 Graviton 上
 #
 # 前提：已完成 01（建集群）。脚本幂等：节点组已存在时跳过创建，只做就绪检查。
 # 本脚本不需要镜像，也不需要 ECR 权限。
@@ -13,7 +13,7 @@
 #
 # 想换成 Graviton2 (c6g) 做对比：
 #   NODEGROUP_FILE=infra/nodegroup-c6g.yaml C7G_NODEGROUP=ng-graviton-c6g \
-#   C7G_INSTANCE_TYPE=c6g.xlarge ./scripts/06a-add-c7g-nodegroup.sh
+#   C7G_INSTANCE_TYPE=c6g.xlarge ./scripts/06-add-c7g-nodegroup.sh
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 
@@ -73,5 +73,5 @@ cat <<EOF
 节点组 ${NODEGROUP_NAME}（${INSTANCE_TYPE}）已就绪，业务负载尚未变动。
 
 下一步：
-  ./scripts/06b-deploy-java-arm64.sh   # 把同一个镜像 tag 部署到 Graviton 节点组
+  ./scripts/04b-deploy-java-arm64.sh   # 把同一个镜像 tag 部署到 Graviton 节点组
 EOF

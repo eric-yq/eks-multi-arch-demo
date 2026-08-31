@@ -53,10 +53,10 @@
     ├── 03-build-push-image.sh      # 方式 A：一台机器交叉构建两种架构
     ├── 03a-build-push-native.sh    # 方式 B：在当前实例上原生构建单架构并推送
     ├── 03b-create-manifest-list.sh # 方式 B：把两个单架构 tag 合并成多架构 tag
-    ├── 04-deploy.sh                # 只部署到 x86 节点组
-    ├── 05-verify.sh                # 步骤 4 后 / 步骤 6 后都可以跑
-    ├── 06a-add-c7g-nodegroup.sh    # 增量①：只加 Graviton 节点组（不动业务）
-    ├── 06b-deploy-java-arm64.sh    # 增量②：把同一个镜像部署到 Graviton
+    ├── 04a-deploy-java-amd64.sh    # 部署 Java 到 x86 节点组
+    ├── 04b-deploy-java-arm64.sh    # 部署 Java 到 Graviton 节点组（需先跑 06）
+    ├── 05-verify.sh                # 任何阶段都可以跑，自动发现已部署的分组
+    ├── 06-add-c7g-nodegroup.sh     # 增量：只加 Graviton 节点组（不动业务）
     ├── 07a-build-push-polyglot-native.sh  # 多语言镜像：在本机架构上原生构建并推送
     ├── 07b-create-polyglot-manifest.sh    # 多语言镜像：合并成多架构 tag
     ├── 08-deploy-polyglot.sh       # 多语言服务：部署到两种架构并对比
@@ -231,7 +231,7 @@ git clone <this-repo> && cd eks-multi-arch-demo
 ```
 
 `03b` 会先检查两个单架构 tag 是否都已存在，缺哪个就报错提示去对应架构的机器上构建，
-合并完再打印 manifest list 校验结果。之后的 `04-deploy.sh` / `05-verify.sh` 完全不变。
+合并完再打印 manifest list 校验结果。之后的部署与验证脚本完全不变。
 
 几个实用开关：
 
@@ -250,13 +250,20 @@ IMAGE_URI=my-registry:5000/java-arch-demo:1.0.0 \
 > 最终 tag 只剩单一架构，另一种架构的节点会以 `no match for platform` 拉取失败。
 > 架构后缀 + manifest 合并就是为了避免这个坑。
 
-## 步骤 4：把服务部署到 x86 节点组（改造前的状态）
+## 步骤 4：部署 Java 服务（按架构拆成两个脚本）
+
+| 脚本 | 作用 | 前提 |
+| --- | --- | --- |
+| `04a-deploy-java-amd64.sh` | 部署到 x86 节点组 | 步骤 1 建好的 x86 节点组 |
+| `04b-deploy-java-arm64.sh` | 部署到 Graviton 节点组 | 先跑步骤 6 加好 Graviton 节点组 |
+
+演示"改造前"的状态只跑 04a：
 
 ```bash
-./scripts/04-deploy.sh
+./scripts/04a-deploy-java-amd64.sh
 ```
 
-只部署 `deployment-amd64.yaml` 与 `service.yaml`，此时集群里也只有 x86 节点：
+它部署 `deployment-amd64.yaml` 与 `service.yaml`，此时集群里也只有 x86 节点：
 
 ```yaml
 # k8s/deployment-amd64.yaml
@@ -363,28 +370,31 @@ kubectl -n demo get svc java-arch-demo-nlb -w    # 等 EXTERNAL-IP
 拆成两个脚本，方便在客户面前把因果分开演示：
 
 ```bash
-./scripts/06a-add-c7g-nodegroup.sh    # ① 只加节点组，业务不动
+./scripts/06-add-c7g-nodegroup.sh    # ① 只加节点组，业务不动
 ./scripts/05-verify.sh                # 可选：此时 Graviton 节点是空的，Pod 还全在 x86
-./scripts/06b-deploy-java-arm64.sh    # ② 同一个镜像 tag 部署上去，Pod 落到 Graviton
+./scripts/04b-deploy-java-arm64.sh    # ② 同一个镜像 tag 部署上去，Pod 落到 Graviton
 ```
 
-**6a 只加节点组**（不需要镜像，也不需要 ECR 权限）：
+**06 只加节点组**（不需要镜像，也不需要 ECR 权限）：
 
 1. 打印改造前的节点与 Pod 分布，现场对照用
 2. `eksctl create nodegroup -f infra/nodegroup-c7g.yaml` 创建节点组（约 3~5 分钟）
 3. 等节点带上 `eks.amazonaws.com/nodegroup=ng-graviton-c7g` 并 Ready
 4. 再打印一次分布——新节点已就绪但上面没有任何业务 Pod，这一步的"空窗"是演示的关键画面
 
-**6b 只部署业务**：
+**04b 只部署业务**（与 04a 对称，只是 nodeSelector 不同）：
 
-1. 先确认集群里有 arm64 节点，没有就提示先跑 6a
+1. 先确认集群里有 arm64 节点，没有就提示先跑 06
 2. 节点组名与实例类型从 arm64 节点的标签自动读取（填进 `/api/info` 的展示字段），
    也可用 `C7G_NODEGROUP` / `C7G_INSTANCE_TYPE` 覆盖
 3. 用**同一个镜像 tag** 部署 `k8s/deployment-arm64.yaml`，并重新 apply Service
 4. 验证：新 Pod 落点、容器内 `uname -m`、`/api/info` 采样、两个节点组的 Pod 分布
 
-两个脚本都幂等，重复执行只会做就绪检查或滚动更新。
-如果集群里存在多个 arm64 节点组，6b 会告警提示 `nodeSelector` 只按架构选、Pod 可能落到任意一个。
+所有脚本都幂等，重复执行只会做就绪检查或滚动更新。
+如果集群里存在多个 arm64 节点组，04b 会告警提示 `nodeSelector` 只按架构选、Pod 可能落到任意一个。
+
+> 编号说明：脚本名按"动作"分组（04x = 部署 Java、06 = 加节点组、07x/08 = 多语言服务），
+> 不是严格的执行顺序。增量演示的实际顺序是 **04a → 05 → 06 → 04b → 05**。
 
 两个 Deployment 逐字对比只有一处不同：
 
@@ -416,11 +426,11 @@ kubectl -n demo rollout status deploy/java-arch-demo-arm64
 
 ```bash
 # 换节点组名（记得同步改 infra/nodegroup-c7g.yaml 里的 name）
-C7G_NODEGROUP=my-ng ./scripts/06a-add-c7g-nodegroup.sh
+C7G_NODEGROUP=my-ng ./scripts/06-add-c7g-nodegroup.sh
 
 # 改用 Graviton2 (c6g)：复制一份 infra/nodegroup-c7g.yaml 改名字与 instanceType，然后
 NODEGROUP_FILE=infra/nodegroup-c6g.yaml C7G_NODEGROUP=ng-graviton-c6g \
-  C7G_INSTANCE_TYPE=c6g.xlarge ./scripts/06a-add-c7g-nodegroup.sh
+  C7G_INSTANCE_TYPE=c6g.xlarge ./scripts/06-add-c7g-nodegroup.sh
 ```
 
 选型参考（us-east-1 按需，已核对 Pricing API）：`c6a.xlarge` $0.153/小时、
@@ -566,9 +576,9 @@ eksctl delete nodegroup --cluster multi-arch-demo --region us-east-1 --name ng-g
 eksctl delete nodegroup --cluster multi-arch-demo --region us-east-1 --name ng-graviton-c7g --wait
 
 # 3) 按新流程演示
-./scripts/04-deploy.sh                # 改造前：只有 x86
-./scripts/06a-add-c7g-nodegroup.sh    # 改造后①：加 Graviton 节点组
-./scripts/06b-deploy-java-arm64.sh    # 改造后②：部署同一个镜像
+./scripts/04a-deploy-java-amd64.sh                # 改造前：只有 x86
+./scripts/06-add-c7g-nodegroup.sh    # 改造后①：加 Graviton 节点组
+./scripts/04b-deploy-java-arm64.sh    # 改造后②：部署同一个镜像
 ```
 
 注意 `java-arch-demo-arm64` 的 Deployment selector 在新旧版本里都是 `{app, arch: arm64}`，

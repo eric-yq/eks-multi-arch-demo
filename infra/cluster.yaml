@@ -8,7 +8,7 @@
 #   - ng-x86-c6a : 1 x c6a.xlarge  (AMD64 / x86_64)
 #
 #   Graviton 节点组是"增量"步骤，单独放在 infra/nodegroup-c7g.yaml，
-#   由 scripts/06a-add-c7g-nodegroup.sh 在集群已存在时添加。
+#   由 scripts/06-add-c7g-nodegroup.sh 在集群已存在时添加。
 #   （eksctl create cluster 没有 --include 过滤，所以两者必须分文件。）
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
@@ -74,7 +74,7 @@ managedNodeGroups:
         cloudWatch: true
 
   # Graviton 节点组不在这里定义：本 demo 的叙事是"先有一个纯 x86 集群，再增量加 Graviton"。
-  # 新增 Graviton 节点组见 infra/nodegroup-c7g.yaml 与 scripts/06a-add-c7g-nodegroup.sh。
+  # 新增 Graviton 节点组见 infra/nodegroup-c7g.yaml 与 scripts/06-add-c7g-nodegroup.sh。
 
 cloudWatch:
   clusterLogging:

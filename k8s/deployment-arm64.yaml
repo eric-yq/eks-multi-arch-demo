@@ -5,7 +5,7 @@
 #   2. 标签 arch: arm64（用于区分两组 Pod，Service 仍然同时选中它们）
 # 镜像地址、探针、资源、安全上下文全部一致——这就是多架构镜像的价值所在。
 #
-# 镜像与节点组信息由 scripts/06b-deploy-java-arm64.sh 替换占位符后 apply。
+# 镜像与节点组信息由 scripts/04b-deploy-java-arm64.sh 替换占位符后 apply。
 # 如果集群里有多个 arm64 节点组（例如同时存在 c6g 与 c7g），想精确指定其中一个，
 # 在 nodeSelector 里再加一行即可：
 #   node.kubernetes.io/instance-type: c7g.xlarge

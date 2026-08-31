@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# 步骤 6b（增量演示，第二步）：把 Java 业务部署到 Graviton 节点组。
+# 步骤 4b：把 Java 服务部署到 **Graviton (arm64) 节点组**。
 #
-# 这一步是给客户看的核心：**镜像 tag 与 x86 侧完全相同**，
-# 两个 Deployment 逐字对比只有 nodeSelector 一处不同，业务就跑到 Graviton 上了。
+# 与 04a 对称：同一个镜像 tag、同一套探针与资源配置，
+# 两个 Deployment 逐字对比只有 nodeSelector 一处不同（amd64 / arm64）。
+# 这就是给客户看的核心：存量集群不动、镜像不换，业务就跑到 Graviton 上了。
 #
-# 前提：已完成 06a（Graviton 节点组已就绪）与 02/03（多架构镜像已推送）。
+# 前提：Graviton 节点组已就绪（./scripts/06-add-c7g-nodegroup.sh）+ 多架构镜像已推送（02/03）。
 # 脚本幂等：Deployment 已存在时只做滚动更新。
 #
 # 节点组名与实例类型默认从集群里的 arm64 节点自动读取（用于填 /api/info 的展示字段），
@@ -25,7 +26,7 @@ aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/de
 # ---------- 1) 确认集群里有 Graviton 节点 ----------
 ARM_NODE="$(kubectl get nodes -l kubernetes.io/arch=arm64 \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-[[ -n "${ARM_NODE}" ]] || die "集群里没有 arm64 节点，请先执行 ./scripts/06a-add-c7g-nodegroup.sh"
+[[ -n "${ARM_NODE}" ]] || die "集群里没有 arm64 节点，请先执行 ./scripts/06-add-c7g-nodegroup.sh"
 
 NODEGROUP_NAME="${C7G_NODEGROUP:-$(kubectl get node "${ARM_NODE}" \
   -o jsonpath='{.metadata.labels.eks\.amazonaws\.com/nodegroup}' 2>/dev/null || echo 'unknown')}"
