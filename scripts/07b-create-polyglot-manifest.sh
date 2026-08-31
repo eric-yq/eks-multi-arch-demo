@@ -19,4 +19,4 @@ if ! create_manifest_list "${POLYGLOT_IMAGE_URI}" \
 fi
 
 log "多语言镜像地址：${POLYGLOT_IMAGE_URI}"
-log "下一步：./scripts/08-deploy-polyglot.sh"
+log "下一步：./scripts/08a-deploy-polyglot-amd64.sh，然后 ./scripts/08b-deploy-polyglot-arm64.sh"

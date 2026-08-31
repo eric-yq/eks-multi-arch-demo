@@ -59,7 +59,9 @@
     ├── 06-add-c7g-nodegroup.sh     # 增量：只加 Graviton 节点组（不动业务）
     ├── 07a-build-push-polyglot-native.sh  # 多语言镜像：在本机架构上原生构建并推送
     ├── 07b-create-polyglot-manifest.sh    # 多语言镜像：合并成多架构 tag
-    ├── 08-deploy-polyglot.sh       # 多语言服务：部署到两种架构并对比
+    ├── 08a-deploy-polyglot-amd64.sh # 多语言服务：部署到 x86
+    ├── 08b-deploy-polyglot-arm64.sh # 多语言服务：部署到 Graviton
+    ├── 09-verify-polyglot.sh       # 多语言服务：三语言 × 两架构 压测对比
     └── 90-cleanup.sh
 
 bench/                              # 独立工具：容器启动耗时基准，见 bench/README.md
@@ -482,14 +484,27 @@ git clone <this-repo> && cd eks-multi-arch-demo
 # 等价：docker buildx imagetools create -t <repo>:1.0.0 <repo>:1.0.0-amd64 <repo>:1.0.0-arm64
 ```
 
-### 8. 部署并对比
+### 8~9. 部署并对比
+
+部署脚本按架构拆开，与 Java 侧的 04a / 04b 对称；跨架构的压测对比单独一个脚本
+（多语言服务版的 `05-verify.sh`）：
 
 ```bash
-./scripts/08-deploy-polyglot.sh
+./scripts/08a-deploy-polyglot-amd64.sh   # 部署到 x86
+./scripts/08b-deploy-polyglot-arm64.sh   # 部署到 Graviton（需先有 Graviton 节点组）
+./scripts/09-verify-polyglot.sh          # 三语言 × 两架构 压测对比
 ```
 
-部署到 x86 与 Graviton 两个节点组，然后用同一个负载（SHA-256 循环，四种语言的实现逻辑一致）
-按语言分组对比两种架构。接口：
+`08b` 会从 arm64 节点的标签自动读取节点组名与实例类型填进展示字段，
+也可用 `C7G_NODEGROUP` / `C7G_INSTANCE_TYPE` 覆盖；只部署了一侧时 `09` 也能跑，表里只有一行。
+
+`09` 默认用容器可见的全部 vCPU 压测，想看单核口径：
+
+```bash
+BENCH_THREADS=1 ./scripts/09-verify-polyglot.sh
+```
+
+用同一个负载（SHA-256 循环，四种语言的实现逻辑一致）按语言分组对比两种架构。接口：
 
 | 路径 | 用途 |
 | --- | --- |
