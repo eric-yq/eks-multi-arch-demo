@@ -1,5 +1,15 @@
-# 把同一个镜像（同一个 tag）调度到 Graviton 节点组（c6g.xlarge）
-# 镜像是 manifest list，kubelet 会自动拉取 arm64 那一份，无需改 image tag。
+# 步骤 6 用：把**完全相同的镜像 tag**部署到新增的 Graviton 节点组。
+#
+# 与 deployment-amd64.yaml 逐字对比，只有两处不同：
+#   1. nodeSelector 的 kubernetes.io/arch 从 amd64 变成 arm64
+#   2. 标签 arch: arm64（用于区分两组 Pod，Service 仍然同时选中它们）
+# 镜像地址、探针、资源、安全上下文全部一致——这就是多架构镜像的价值所在。
+#
+# 镜像与节点组信息由 scripts/06-add-c7g-nodegroup.sh 替换占位符后 apply。
+# 如果集群里有多个 arm64 节点组（例如同时存在 c6g 与 c7g），想精确指定其中一个，
+# 在 nodeSelector 里再加一行即可：
+#   node.kubernetes.io/instance-type: c7g.xlarge
+#   或 eks.amazonaws.com/nodegroup: ng-graviton-c7g
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -55,9 +65,9 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: NODE_GROUP
-              value: ng-graviton-c6g
+              value: NODEGROUP_PLACEHOLDER
             - name: NODE_INSTANCE_TYPE
-              value: c6g.xlarge
+              value: INSTANCE_TYPE_PLACEHOLDER
           resources:
             requests:
               cpu: 300m

@@ -4,9 +4,12 @@
 #   eksctl create cluster -f infra/cluster.yaml
 #
 # 说明：
-#   - ng-x86-c6a      : 1 x c6a.xlarge  (AMD64 / x86_64)
-#   - ng-graviton-c6g : 1 x c6g.xlarge  (ARM64 / Graviton2)
-#   两个节点组都使用 AmazonLinux2023，eksctl 会依据实例类型自动选择 x86_64 / arm64 AMI。
+#   本文件只创建 **一个 x86 节点组**，对应客户现状：集群里全是 x86 节点。
+#   - ng-x86-c6a : 1 x c6a.xlarge  (AMD64 / x86_64)
+#
+#   Graviton 节点组是"增量"步骤，单独放在 infra/nodegroup-c7g.yaml，
+#   由 scripts/06-add-c7g-nodegroup.sh 在集群已存在时添加。
+#   （eksctl create cluster 没有 --include 过滤，所以两者必须分文件。）
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
 
@@ -22,7 +25,7 @@ metadata:
 iam:
   withOIDC: true
 
-# 默认 VPC：3 个可用区（c6a 与 c6g 在这三个 AZ 均可用），公有 + 私有子网 + 单个 NAT 网关
+# 默认 VPC：3 个可用区（c6a / c6g / c7g 在这三个 AZ 均可用），公有 + 私有子网 + 单个 NAT 网关
 vpc:
   nat:
     gateway: Single
@@ -70,51 +73,8 @@ managedNodeGroups:
       withAddonPolicies:
         cloudWatch: true
 
-  # ---------- 节点组 2：ARM64 / Graviton2 ----------
-  - name: ng-graviton-c6g
-    amiFamily: AmazonLinux2023
-    instanceType: c6g.xlarge
-    desiredCapacity: 1
-    minSize: 1
-    maxSize: 2
-    volumeSize: 50
-    volumeType: gp3
-    privateNetworking: true
-    labels:
-      demo.arch: arm64
-      demo.cpu: aws-graviton
-      workload: java-demo
-    tags:
-      nodegroup-arch: arm64
-      nodegroup-instance-type: c6g.xlarge
-    iam:
-      withAddonPolicies:
-        cloudWatch: true
-
-  # ---------- 节点组 3：ARM64 / Graviton3（增量添加）----------
-  # 集群已存在时不要重跑 create cluster，用下面的脚本单独添加这个节点组：
-  #   ./scripts/06-add-c7g-nodegroup.sh
-  #   （等价：eksctl create nodegroup -f infra/cluster.yaml --include=ng-graviton-c7g）
-  - name: ng-graviton-c7g
-    amiFamily: AmazonLinux2023
-    instanceType: c7g.xlarge
-    desiredCapacity: 1
-    minSize: 1
-    maxSize: 2
-    volumeSize: 50
-    volumeType: gp3
-    privateNetworking: true
-    labels:
-      demo.arch: arm64
-      demo.cpu: aws-graviton3
-      demo.nodegroup: ng-graviton-c7g
-      workload: java-demo
-    tags:
-      nodegroup-arch: arm64
-      nodegroup-instance-type: c7g.xlarge
-    iam:
-      withAddonPolicies:
-        cloudWatch: true
+  # Graviton 节点组不在这里定义：本 demo 的叙事是"先有一个纯 x86 集群，再增量加 Graviton"。
+  # 新增 Graviton 节点组见 infra/nodegroup-c7g.yaml 与 scripts/06-add-c7g-nodegroup.sh。
 
 cloudWatch:
   clusterLogging:

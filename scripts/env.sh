@@ -80,12 +80,15 @@ ecr_login() {
     | docker login --username AWS --password-stdin "${REGISTRY_HOST}"
 }
 
-# 按 CLUSTER_NAME / AWS_REGION 渲染 infra/cluster.yaml，输出渲染后的文件路径。
+# 按 CLUSTER_NAME / AWS_REGION 渲染 eksctl 配置，输出渲染后的文件路径。
+# 用法：render_eksctl_config [相对仓库根的配置路径]，默认 infra/cluster.yaml。
 # 换区域时会去掉硬编码的可用区，交给 eksctl 自动选择。
-render_cluster_config() {
-  local src="${REPO_ROOT}/infra/cluster.yaml"
-  local rendered="${BUILD_DIR}/cluster.rendered.yaml"
+render_eksctl_config() {
+  local rel="${1:-infra/cluster.yaml}"
+  local src="${REPO_ROOT}/${rel}"
+  local rendered="${BUILD_DIR}/$(basename "${rel}" .yaml).rendered.yaml"
   mkdir -p "${BUILD_DIR}"
+  [[ -f "${src}" ]] || die "找不到配置文件：${src}"
 
   if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
     python3 - "${src}" "${rendered}" "${CLUSTER_NAME}" "${AWS_REGION}" <<'PY'
@@ -111,6 +114,9 @@ PY
 
   echo "${rendered}"
 }
+
+# 兼容旧名字
+render_cluster_config() { render_eksctl_config "infra/cluster.yaml"; }
 
 # 找到一个 >= 21 的 JDK（Spring Boot 3.5 + Java 21）
 find_jdk21() {

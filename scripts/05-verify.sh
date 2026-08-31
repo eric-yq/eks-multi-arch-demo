@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# 步骤 5：验证同一个镜像分别跑在 x86 与各代 Graviton 节点上
+# 步骤 5：验证服务在各节点组上的分布与表现
 #
-# 说明：Pod 上的 arch 标签是"部署分组标识"（amd64 / arm64 / arm64-c7g），
-# 因为 Deployment 的 spec.selector 不可变，各组必须取不同的值才不会互相抢 Pod。
-# 真实 CPU 架构看节点标签 kubernetes.io/arch 与容器内的 uname -m。
+# 步骤 4 之后跑：只有 amd64 一组，用来展示"改造前"的现状。
+# 步骤 6 之后跑：amd64 + arm64 两组，用来对比同一个镜像在 x86 与 Graviton 上的表现。
+#
+# 说明：Pod 上的 arch 标签是"部署分组标识"，同时也是 Deployment selector 的一部分
+# （selector 创建后不可变，所以各组必须取不同的值，否则会互相抢 Pod）。
+# 真实 CPU 架构以节点标签 kubernetes.io/arch 和容器内 uname -m 为准。
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 

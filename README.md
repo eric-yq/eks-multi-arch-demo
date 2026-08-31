@@ -1,23 +1,30 @@
 # EKS 多架构（x86 + Graviton）Java Demo
 
-在一个 EKS 集群里同时运行 x86 与 Graviton 节点，用**同一个 jar、同一个镜像 tag**把 Java 服务
-部署到两种架构上，并能直接从接口看到每个 Pod 实际跑在哪种 CPU 上。
+演示的是一条**迁移路径**，而不是一个一开始就多架构的集群：
+
+> 客户现状：EKS 集群里全是 x86 节点，Java 服务跑在 x86 上。
+> 演示动作：**新增一个 Graviton 节点组**，用**完全相同的镜像 tag** 把服务也部署上去，
+> 存量集群、Service、镜像地址都不动。
+
+| 阶段 | 集群状态 | 对应步骤 |
+| --- | --- | --- |
+| 改造前 | 1 个节点组 `ng-x86-c6a`：1 × `c6a.xlarge`（AMD64），服务只跑在 x86 | 步骤 1 → 4 |
+| 改造后 | 增加 `ng-graviton-c7g`：1 × `c7g.xlarge`（Graviton3 / ARM64），同一个镜像同时跑在两种架构上 | 步骤 6 |
 
 | 组成 | 说明 |
 | --- | --- |
 | EKS 集群 | `multi-arch-demo`，Kubernetes 1.36，us-east-1 |
-| 节点组 1 | `ng-x86-c6a`：1 × `c6a.xlarge`（AMD64） |
-| 节点组 2 | `ng-graviton-c6g`：1 × `c6g.xlarge`（Graviton2 / ARM64） |
-| 节点组 3（可增量添加） | `ng-graviton-c7g`：1 × `c7g.xlarge`（Graviton3 / ARM64），见步骤 6 |
 | Java 应用 | Spring Boot 3.5.16 + Java 21，暴露架构信息与一个简易 CPU 压测接口 |
 | 镜像 | 单个 tag 的 manifest list，同时包含 `linux/amd64` 与 `linux/arm64` |
-| 部署 | 两个 Deployment 用 `nodeSelector: kubernetes.io/arch` 分别落到 x86 与 Graviton，一个 Service 统一入口 |
+| 部署 | 两个 Deployment 只有 `nodeSelector: kubernetes.io/arch` 一处不同，一个 Service 统一入口 |
 
 ## 目录结构
 
 ```
 .
-├── infra/cluster.yaml              # eksctl 集群 + 两个托管节点组
+├── infra/
+│   ├── cluster.yaml                # 步骤 1：集群 + 唯一的 x86 节点组
+│   └── nodegroup-c7g.yaml          # 步骤 6：增量添加的 Graviton3 节点组（只含节点组）
 ├── app/                            # Java 应用
 │   ├── pom.xml
 │   ├── Dockerfile                  # 多架构镜像（只 COPY jar，无需 QEMU 交叉执行）
@@ -28,9 +35,8 @@
 │       └── BenchmarkController.java# GET /api/bench  简易 CPU 对比
 ├── k8s/
 │   ├── 00-namespace.yaml
-│   ├── deployment-amd64.yaml       # nodeSelector kubernetes.io/arch=amd64
-│   ├── deployment-arm64.yaml       # nodeSelector kubernetes.io/arch=arm64
-│   ├── deployment-c7g.yaml         # 只落在 c7g.xlarge（Graviton3）节点组
+│   ├── deployment-amd64.yaml       # 步骤 4：nodeSelector kubernetes.io/arch=amd64
+│   ├── deployment-arm64.yaml       # 步骤 6：nodeSelector kubernetes.io/arch=arm64
 │   ├── deployment-mixed.yaml       # 进阶：一个 Deployment 跨两种架构均匀分布
 │   ├── service.yaml                # ClusterIP，同时选中两组 Pod
 │   └── service-nlb.yaml            # 可选：对外暴露（会创建 NLB）
@@ -41,10 +47,12 @@
     ├── 03-build-push-image.sh      # 方式 A：一台机器交叉构建两种架构
     ├── 03a-build-push-native.sh    # 方式 B：在当前实例上原生构建单架构并推送
     ├── 03b-create-manifest-list.sh # 方式 B：把两个单架构 tag 合并成多架构 tag
-    ├── 04-deploy.sh
-    ├── 05-verify.sh
-    ├── 06-add-c7g-nodegroup.sh     # 增量：新增 c7g 节点组并部署到它上面
+    ├── 04-deploy.sh                # 只部署到 x86 节点组
+    ├── 05-verify.sh                # 步骤 4 后 / 步骤 6 后都可以跑
+    ├── 06-add-c7g-nodegroup.sh     # 增量：加 Graviton 节点组 + 部署同一个镜像
     └── 90-cleanup.sh
+
+bench/                              # 独立工具：容器启动耗时基准，见 bench/README.md
 ```
 
 ## 前置条件
@@ -67,7 +75,7 @@ chmod +x ~/.docker/cli-plugins/docker-buildx
 ```
 
 费用提示（us-east-1 按需价格，已核对 AWS Pricing API）：EKS 控制平面 **$0.10/小时**，
-`c6a.xlarge` **$0.153/小时**，`c6g.xlarge` **$0.136/小时**（Graviton2 比同规格 x86 便宜约 11%），
+`c6a.xlarge` **$0.153/小时**，`c7g.xlarge` **$0.145/小时**（Graviton3 比同规格 x86 便宜约 5%），
 另有 NAT 网关、EBS 与数据传输费用。**用完请执行清理步骤。**
 
 所有脚本的参数都可用环境变量覆盖，例如：
@@ -80,14 +88,14 @@ export IMAGE_TAG=1.0.1
 
 ---
 
-## 步骤 1：创建 EKS 集群与两个节点组
+## 步骤 1：创建 EKS 集群（只有一个 x86 节点组）
 
 ```bash
 ./scripts/01-create-cluster.sh
 # 等价于：eksctl create cluster -f infra/cluster.yaml
 ```
 
-耗时约 15~20 分钟。核心配置：
+耗时约 15~20 分钟。这一步刻意**只建一个 x86 节点组**，用来代表客户的存量集群：
 
 ```yaml
 managedNodeGroups:
@@ -95,14 +103,11 @@ managedNodeGroups:
     amiFamily: AmazonLinux2023
     instanceType: c6a.xlarge      # x86_64
     desiredCapacity: 1
-  - name: ng-graviton-c6g
-    amiFamily: AmazonLinux2023
-    instanceType: c6g.xlarge      # ARM64 / Graviton2
-    desiredCapacity: 1
 ```
 
-同一个 `amiFamily` 即可，eksctl 会依据实例类型自动选择 x86_64 或 arm64 的 AL2023 AMI，
-不需要手工指定 ARM 镜像。
+Graviton 节点组不在这个文件里，而是单独放在 `infra/nodegroup-c7g.yaml`，由步骤 6 添加。
+必须分成两个文件：`eksctl create cluster` 没有 `--include` 过滤节点组，写在一起的话建集群时就会
+把 Graviton 节点一并建出来，"先只有 x86"的前提就没了。
 
 验证：
 
@@ -110,7 +115,7 @@ managedNodeGroups:
 kubectl get nodes -L kubernetes.io/arch,node.kubernetes.io/instance-type,eks.amazonaws.com/nodegroup
 ```
 
-预期看到两个节点，`ARCH` 列分别是 `amd64` 与 `arm64`。
+预期只看到 1 个节点，`ARCH=amd64`、`INSTANCE-TYPE=c6a.xlarge`。
 
 ## 步骤 2：构建 Java 应用的 jar
 
@@ -235,14 +240,13 @@ IMAGE_URI=my-registry:5000/java-arch-demo:1.0.0 \
 > 最终 tag 只剩单一架构，另一种架构的节点会以 `no match for platform` 拉取失败。
 > 架构后缀 + manifest 合并就是为了避免这个坑。
 
-## 步骤 4：把服务部署到 x86 与 Graviton 节点
+## 步骤 4：把服务部署到 x86 节点组（改造前的状态）
 
 ```bash
 ./scripts/04-deploy.sh
 ```
 
-脚本把 manifest 里的 `IMAGE_PLACEHOLDER` 替换成真实镜像地址后 apply。两个 Deployment
-**镜像 tag 完全相同**，唯一区别是 `nodeSelector`：
+只部署 `deployment-amd64.yaml` 与 `service.yaml`，此时集群里也只有 x86 节点：
 
 ```yaml
 # k8s/deployment-amd64.yaml
@@ -251,31 +255,25 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/arch: amd64      # 落在 c6a.xlarge
----
-# k8s/deployment-arm64.yaml
-spec:
-  template:
-    spec:
-      nodeSelector:
-        kubernetes.io/arch: arm64      # 落在 c6g.xlarge（Graviton）
 ```
 
-`kubernetes.io/arch` 是 kubelet 自动打的标签，不需要自定义。节点拉取镜像时，
-containerd 会根据自身架构从 manifest list 里挑选对应的那一份，所以两边用同一个 tag 即可。
+`kubernetes.io/arch` 是 kubelet 自动打的标签，不需要自定义。
 
 手工执行等价命令：
 
 ```bash
 IMAGE=<account>.dkr.ecr.<region>.amazonaws.com/java-arch-demo:1.0.0
 kubectl apply -f k8s/00-namespace.yaml
-for f in deployment-amd64.yaml deployment-arm64.yaml service.yaml; do
+for f in deployment-amd64.yaml service.yaml; do
   sed "s|IMAGE_PLACEHOLDER|$IMAGE|g" k8s/$f | kubectl apply -f -
 done
 kubectl -n demo rollout status deploy/java-arch-demo-amd64
-kubectl -n demo rollout status deploy/java-arch-demo-arm64
 ```
 
-其他常见的架构调度方式（按需选用）：
+跑一次 `./scripts/05-verify.sh` 可以把"改造前"的状态留档：只有一组 amd64 Pod。
+Graviton 部分在步骤 6。
+
+其他常见的架构调度方式（步骤 6 之后按需选用）：
 
 - `nodeAffinity` + `In [amd64, arm64]`：允许两种架构，配合 `topologySpreadConstraints`
   按 `topologyKey: kubernetes.io/arch` 均匀分布，见 `k8s/deployment-mixed.yaml`；
@@ -293,23 +291,25 @@ kubectl -n demo rollout status deploy/java-arch-demo-arm64
 脚本依次输出：节点架构表 → Pod 落点（含节点真实架构与实例类型）→ 每个 Pod 容器内 `uname -m` →
 通过 Service 采样 12 次的架构/实例类型分布 → **自动发现所有部署分组**并逐组做 `/api/bench` 对比：
 
+步骤 4 之后跑只有 `amd64` 一组，步骤 6 之后会变成两组，形如（数值取自 c6a.xlarge 与 c7g.xlarge 实测）：
+
 ```
-==> 5) 粗略 CPU 对比：3 个分组 × 2000000 次 SHA-256（仅供参考，非正式基准测试）
+==> 5) 粗略 CPU 对比：2 个分组 × 2000000 次 SHA-256（仅供参考，非正式基准测试）
    GROUP       INSTANCE-TYPE  OS-ARCH       耗时(ms)          ops/s       相对    vCPU
    amd64       c6a.xlarge     amd64         148.36     13,481,043     100%       1
-   arm64-c7g   c7g.xlarge     aarch64       191.55     10,441,234      77%       1
-   arm64       c6g.xlarge     aarch64       209.26      9,557,328      71%       1
+   arm64       c7g.xlarge     aarch64       191.55     10,441,234      77%       1
 ```
 
 新增节点组后不用改脚本：分组是从 Pod 的 `arch` 标签自动枚举出来的。
 压测前每组会先跑一轮并丢弃结果——JIT 编译只发生在首次调用，否则"冷"的那一组会明显偏慢
-（实测 c7g 冷跑 250ms、热跑 191ms，不预热会得出 c7g 比 c6g 慢的错误结论）。
+（实测同一个 Pod 冷跑 250ms、热跑 191ms，不预热会得出错误结论）。
 
-> **`arch` 标签 ≠ CPU 架构。** `kubectl get pods -L arch` 里的列打印的是 Pod 标签值
-> （`amd64` / `arm64` / `arm64-c7g`），它只是**部署分组标识**：Deployment 的 `spec.selector`
-> 不可变，各组必须取不同值，否则两个 Deployment 会互相认领对方的 Pod。
-> 真实架构看节点标签 `kubernetes.io/arch`、节点的 `node.kubernetes.io/instance-type`，
-> 或容器里的 `uname -m`——`05-verify.sh` 第 2、3 步会把这几项一起打出来。
+> `kubectl get pods -L arch` 里的 ARCH 列打印的是 **Pod 标签**，同时也是 Deployment selector
+> 的一部分（selector 创建后不可变，所以各组必须取不同值，否则两个 Deployment 会互相抢 Pod）。
+> 本流程里它的取值就是真实架构 `amd64` / `arm64`；但如果你再加第二个 arm64 节点组（比如 c6g），
+> 新那组就必须换一个值（例如 `arm64-c6g`），此时标签就不再等于架构了。
+> 真实架构以节点标签 `kubernetes.io/arch`、`node.kubernetes.io/instance-type` 和容器内 `uname -m` 为准，
+> `05-verify.sh` 第 2、3 步会把这几项一起打出来。
 
 手工验证：
 
@@ -332,7 +332,7 @@ curl -s localhost:8080/api/info | jq '.architecture, .kubernetes'
 ```json
 // c6a.xlarge
 { "osArch": "amd64",   "platform": "x86_64 (Intel/AMD)" }
-// c6g.xlarge
+// c7g.xlarge
 { "osArch": "aarch64", "platform": "AWS Graviton (aarch64)" }
 ```
 
@@ -345,55 +345,64 @@ kubectl -n demo get svc java-arch-demo-nlb -w    # 等 EXTERNAL-IP
 
 ---
 
-## 步骤 6（增量）：新增 c7g.xlarge 节点组并把服务部署上去
+## 步骤 6（增量，演示重点）：新增 Graviton 节点组并把服务部署上去
 
-给**已有集群**再加一个 Graviton3 节点组（1 台 `c7g.xlarge`），并把同一个镜像部署到它上面：
+这是给客户看的核心动作：**存量 x86 集群不动，只加一个节点组 + 改一行 nodeSelector**，
+业务就跑在 Graviton 上了。
 
 ```bash
 ./scripts/06-add-c7g-nodegroup.sh
 ```
 
-脚本按顺序做四件事，全程幂等（节点组/Deployment 已存在则跳过创建、只做滚动更新）：
+脚本按顺序做四件事，全程幂等（节点组 / Deployment 已存在则跳过创建、只做滚动更新）：
 
-1. `eksctl create nodegroup -f infra/cluster.yaml --include=ng-graviton-c7g` 创建节点组（约 3~5 分钟）
-2. 等新节点带上 `eks.amazonaws.com/nodegroup=ng-graviton-c7g` 标签并 Ready
-3. 用同一个多架构镜像 tag 部署 `k8s/deployment-c7g.yaml`，并重新 apply Service
-4. 打印验证信息：节点表、新 Pod 落点、容器内 `uname -m`、`/api/info` 采样、三个节点组的 Pod 分布
+1. 先打印改造前的节点与 Pod 分布（现场对照用）
+2. `eksctl create nodegroup -f infra/nodegroup-c7g.yaml` 创建 Graviton 节点组（约 3~5 分钟），
+   然后等节点带上 `eks.amazonaws.com/nodegroup=ng-graviton-c7g` 并 Ready
+3. 用**同一个镜像 tag** 部署 `k8s/deployment-arm64.yaml`，并重新 apply Service
+4. 验证：节点表、新 Pod 落点、容器内 `uname -m`、`/api/info` 采样、两个节点组的 Pod 分布
 
-调度上有两个容易踩的点，manifest 里都处理了：
+两个 Deployment 逐字对比只有一处不同：
 
 ```yaml
-metadata:
-  labels:
-    app: java-arch-demo
-    arch: arm64-c7g          # 不能写 arm64：会和 deployment-arm64 的 selector 撞车、互相抢 Pod
-spec:
-  selector:
-    matchLabels:
-      app: java-arch-demo
-      arch: arm64-c7g
-  template:
-    spec:
-      nodeSelector:
-        kubernetes.io/arch: arm64
-        node.kubernetes.io/instance-type: c7g.xlarge   # c6g 也是 arm64，只按架构选会落错节点组
+# k8s/deployment-amd64.yaml          # k8s/deployment-arm64.yaml
+nodeSelector:                        nodeSelector:
+  kubernetes.io/arch: amd64            kubernetes.io/arch: arm64
 ```
 
-`Service` 的 selector 只有 `app: java-arch-demo`，所以新 Pod 会自动加入同一个服务后端，
-访问同一个地址即可看到流量分布在 c6a / c6g / c7g 三种实例上。
+镜像地址、探针、资源限制、安全上下文全部相同。节点拉镜像时 containerd 会按自身架构
+从 manifest list 里挑对应的那一份，所以**不需要为 Graviton 换镜像地址**。
 
-想改节点组名字：`C7G_NODEGROUP=my-ng ./scripts/06-add-c7g-nodegroup.sh`
-（同时记得改 `infra/cluster.yaml` 里的节点组名）。
+`Service` 的 selector 只有 `app: java-arch-demo`，新 Pod 自动加入同一个服务后端，
+访问同一个地址就能看到流量分摊到 x86 与 Graviton 两种实例上——这一点客户最关心。
 
-关于 c6g 与 c7g：us-east-1 按需价格 `c6g.xlarge` $0.136/小时、`c7g.xlarge` $0.145/小时，
-c7g（Graviton3）单价略高但单核性能明显更好，通常性价比更优。用同一份 jar 直接对比：
+手工执行等价命令：
 
 ```bash
-kubectl -n demo port-forward deploy/java-arch-demo-arm64 8081:8080   # c6g
-kubectl -n demo port-forward deploy/java-arch-demo-c7g   8082:8080   # c7g
-curl -s 'localhost:8081/api/bench?iterations=2000000' | jq '{platform,elapsedMillis,opsPerSecond}'
-curl -s 'localhost:8082/api/bench?iterations=2000000' | jq '{platform,elapsedMillis,opsPerSecond}'
+IMAGE=<account>.dkr.ecr.<region>.amazonaws.com/java-arch-demo:1.0.0
+eksctl create nodegroup -f infra/nodegroup-c7g.yaml
+sed -e "s|IMAGE_PLACEHOLDER|$IMAGE|g" \
+    -e "s|NODEGROUP_PLACEHOLDER|ng-graviton-c7g|g" \
+    -e "s|INSTANCE_TYPE_PLACEHOLDER|c7g.xlarge|g" \
+    k8s/deployment-arm64.yaml | kubectl apply -f -
+kubectl -n demo rollout status deploy/java-arch-demo-arm64
 ```
+
+可选参数：
+
+```bash
+# 换节点组名（记得同步改 infra/nodegroup-c7g.yaml 里的 name）
+C7G_NODEGROUP=my-ng ./scripts/06-add-c7g-nodegroup.sh
+
+# 改用 Graviton2 (c6g)：复制一份 infra/nodegroup-c7g.yaml 改名字与 instanceType，然后
+NODEGROUP_FILE=infra/nodegroup-c6g.yaml C7G_NODEGROUP=ng-graviton-c6g \
+  C7G_INSTANCE_TYPE=c6g.xlarge ./scripts/06-add-c7g-nodegroup.sh
+```
+
+选型参考（us-east-1 按需，已核对 Pricing API）：`c6a.xlarge` $0.153/小时、
+`c6g.xlarge` $0.136/小时、`c7g.xlarge` $0.145/小时。c7g（Graviton3）比 c6a 便宜约 5%，
+实测同一份 jar 的单核 SHA-256 吞吐约为 c6a 的 77%、比 c6g 高约 9%——
+真实业务请用自己的负载压测后再定型号。
 
 ## 清理
 
@@ -422,11 +431,38 @@ DELETE_ECR=true DELETE_CLUSTER=true ./scripts/90-cleanup.sh
   另一次推送 `:1.0.0-arm64`，`03b` 合并出的 `:1.0.0` 是包含 `linux/amd64` + `linux/arm64`
   的 manifest list；在移除 buildx 插件的情况下，`docker build` + `docker manifest create/push`
   的回退路径同样跑通。
-- `eksctl create cluster -f infra/cluster.yaml --dry-run` 校验通过（EKS 1.36、两个节点组、
-  c6a.xlarge/c6g.xlarge、AL2023）。
+- `eksctl create cluster -f infra/cluster.yaml --dry-run` 校验通过（EKS 1.36、1 个 x86 节点组、
+  c6a.xlarge、AL2023）。
+- `eksctl create nodegroup -f infra/nodegroup-c7g.yaml --dry-run` 对着真实集群校验通过
+  （AL2023 / c7g.xlarge / desiredCapacity 1，正确复用集群已有的私有子网）。
+- `kubectl apply --dry-run=server` 对 `deployment-amd64.yaml` 与 `deployment-arm64.yaml`
+  均返回 created（在真实 1.36 集群上验证了 schema 与准入检查）。
 
 尚未执行（需要真实资源，会计费，请按需运行上面的步骤）：创建 EKS 集群、推送镜像到 ECR、
 在集群中部署与验证。
+
+## 如果集群是按旧流程（一开始就带 Graviton 节点组）建的
+
+旧版 `infra/cluster.yaml` 会在步骤 1 就建出 `ng-graviton-c6g`，`k8s/` 下也曾有一个
+`deployment-c7g.yaml`（标签 `arch: arm64-c7g`）。要用新流程演示"从纯 x86 开始"，
+最干净的做法是重建集群；不想重建就手工收敛到新状态：
+
+```bash
+# 1) 清掉旧的 demo 负载（含旧的 java-arch-demo-c7g / java-arch-demo-arm64）
+kubectl delete namespace demo --ignore-not-found
+
+# 2) 删掉多余的 Graviton 节点组，只留 x86，回到"改造前"
+eksctl delete nodegroup --cluster multi-arch-demo --region us-east-1 --name ng-graviton-c6g --wait
+eksctl delete nodegroup --cluster multi-arch-demo --region us-east-1 --name ng-graviton-c7g --wait
+
+# 3) 按新流程演示
+./scripts/04-deploy.sh                # 改造前：只有 x86
+./scripts/06-add-c7g-nodegroup.sh     # 改造后：加 Graviton 并部署
+```
+
+注意 `java-arch-demo-arm64` 的 Deployment selector 在新旧版本里都是 `{app, arch: arm64}`，
+可以原地 apply 更新；但如果集群里同时留着 c6g 和 c7g 两个 arm64 节点组，
+`nodeSelector: kubernetes.io/arch=arm64` 会落到任意一个上，所以务必先删掉不需要的那个节点组。
 
 ## Graviton 迁移备忘
 
