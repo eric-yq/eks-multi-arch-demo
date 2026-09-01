@@ -28,10 +28,63 @@
 | 自研原生库 | Java 的 JNI `.so`、Go 经 CGO 调用的 `.so` | 必须按架构各编译一次 |
 | 架构特定指令集代码 | C++ 的 SIMD（x86 SSE2/AVX2 vs arm64 NEON） | 要为每种架构分别实现并校验结果一致 |
 
+## 架构图
+
+四张图对应演示的各个阶段，PNG 可直接放进 PPT。图由代码生成，改机型或改名后重跑即可同步：
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r docs/diagrams/requirements.txt
+sudo apt-get install -y graphviz fonts-noto-cjk    # 系统依赖，缺字体中文会变方框
+.venv/bin/python docs/diagrams/generate.py
+```
+
+**1. 改造前**——存量集群只有一个 x86 节点组，流量 100% 落在 x86。这是客户现状的画面。
+
+![改造前](docs/diagrams/1-before-x86-only.png)
+
+**2. 同一个 tag 为什么能跑两种架构**——manifest list 里按 `architecture` 字段索引出两个 manifest，
+containerd 按节点架构自动挑选，镜像地址一个字都不用改。这是整个 demo 的技术内核。
+
+![镜像架构解析](docs/diagrams/2-image-arch-resolution.png)
+
+**3. 多架构镜像构建**——两台不同架构的构建机各自原生编译，再合成 manifest list 推到 ECR。
+没有 QEMU：JNI 的 `.so`、CGO 产物、按架构分支的 SIMD 代码都必须在目标架构上真编一遍。
+
+![多架构镜像构建](docs/diagrams/3-build-multiarch-image.png)
+
+**4. 改造后**——增量加一个 Graviton 节点组，集群、VPC、Service、镜像全都不动。
+两份 Deployment 的差别只有 `nodeSelector` 一行，一个 Service 同时选中两组 Pod。
+
+![改造后](docs/diagrams/4-after-add-graviton.png)
+
+**5. 多语言服务的镜像构建**——`polyglot/Dockerfile` 的 4 个阶段。自研 C 库先编成 `.so`，
+再被 Go 以 `CGO_ENABLED=1` 链进去（`rpath /app/lib`），C++ 单独编一个含 SIMD 分支的二进制，
+Python 源码直接 COPY。前三个阶段的产物都是原生机器码，**每种架构都要真编一遍**。
+
+![多语言服务构建](docs/diagrams/5-polyglot-build.png)
+
+**6. 多语言服务运行时**——这张最适合解释"一个镜像里塞三种语言"到底怎么跑：
+Pod 里只有 `polyglot-server` 一个常驻进程（PID 1，唯一的网络前门，`GOMAXPROCS` 按 cgroup 配额设置）。
+Python 与 C++ 没有自己的端口，每次请求才 fork 一个子进程、跑完即退出；
+而 CGO 那条线不是子进程，是同进程内的动态库调用。
+
+![多语言服务运行时](docs/diagrams/6-polyglot-runtime.png)
+
+**7. 端到端总览**——把两个服务、两台构建机、两个 ECR 仓库、两个节点组、两个 Service
+和验证脚本串成一张图，标了每一步对应的脚本编号。适合开场讲整体、收尾做回顾。
+注意每台构建机都要推**两个仓库**的对应架构 tag。
+
+![端到端总览](docs/diagrams/7-end-to-end-overview.png)
+
 ## 目录结构
 
 ```
 .
+├── docs/diagrams/
+│   ├── generate.py                 # 用 diagrams 库生成 AWS 风格架构图
+│   ├── requirements.txt            # 生成架构图的依赖
+│   └── *.png                       # 生成的四张图
 ├── infra/
 │   ├── cluster.yaml                # 步骤 1：集群 + 唯一的 x86 节点组
 │   └── nodegroup-c9g.yaml          # 步骤 6：增量添加的 Graviton5 节点组（只含节点组）

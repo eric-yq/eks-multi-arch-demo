@@ -1,0 +1,12 @@
+# 生成架构图所需的 Python 依赖
+# 用法：
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r docs/diagrams/requirements.txt
+#   .venv/bin/python docs/diagrams/generate.py
+#
+# 另需系统依赖（pip 装不了）：
+#   Ubuntu/Debian: sudo apt-get install -y graphviz fonts-noto-cjk
+#   Amazon Linux:  sudo dnf install -y graphviz google-noto-sans-cjk-fonts
+#   macOS:         brew install graphviz && brew install --cask font-noto-sans-cjk
+# 缺 graphviz 会直接报错；缺 CJK 字体则图里的中文会渲染成方框。
+diagrams==0.24.4
