@@ -170,4 +170,105 @@ print("       否则 cgroup 配额会把多线程压回单核（各组的 limits
   fi
 fi
 
+# ---------- 6) 原生依赖：lz4-java（第三方 .so）与自研 JNI 库 ----------
+# 这一段是真正的断言，不只是打印：
+#   - archMatchesJvm=false 说明加载到了错误架构的 .so
+#   - usingNativeSo=false  说明 lz4 退回了纯 Java 实现，没走 jar 内置的 .so
+#   - roundTripVerified/xxHashMatch=false 说明压缩结果不自洽
+verify_failed=0
+
+if [[ "${#targets[@]}" -eq 0 ]]; then
+  warn "6) 没有运行中的 Pod，跳过原生依赖检查"
+else
+  log "6) 原生依赖检查（lz4-java 第三方 .so + 自研 libarchdemo_native.so via JNI）"
+
+  probe_cmd=""
+  for t in "${targets[@]}"; do
+    IFS='|' read -r group itype ip _pod <<<"${t}"
+    probe_cmd+="printf 'compress|%s|%s|' '${group}' '${itype}'; "
+    probe_cmd+="wget -qO- 'http://${ip}:8080/api/compress?sizeBytes=262144&iterations=30' | tr -d '\n '; echo; "
+    probe_cmd+="printf 'native|%s|%s|' '${group}' '${itype}'; "
+    probe_cmd+="wget -qO- 'http://${ip}:8080/api/native?iterations=20000&sizeBytes=4096' | tr -d '\n '; echo; "
+  done
+
+  native_raw="$(run_probe native-probe "${probe_cmd}" || true)"
+
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "${native_raw}" | python3 -c '
+import json, sys
+
+compress, native = [], []
+for line in sys.stdin:
+    parts = line.strip().split("|", 3)
+    if len(parts) != 4 or not parts[3].startswith("{"):
+        continue
+    kind, group, itype, payload = parts
+    try:
+        d = json.loads(payload)
+    except json.JSONDecodeError:
+        continue
+    d["_group"], d["_itype"] = group, itype
+    (compress if kind == "compress" else native).append(d)
+
+failures = []
+
+if compress:
+    print()
+    print("   lz4-java（jar 内置各架构 .so，代表上游已适配 aarch64 的第三方依赖）")
+    print("   {:<11} {:<14} {:<22} {:>7} {:>10} {:>12} {:>8}".format(
+        "GROUP", "INSTANCE-TYPE", "IMPLEMENTATION", "原生so", "压缩率",
+        "压缩MiB/s", "往返校验"))
+    for d in compress:
+        group = d["_group"]
+        native_so = d.get("usingNativeSo")
+        ok = d.get("roundTripVerified") and d.get("xxHashMatch")
+        print("   {:<11} {:<14} {:<22} {:>7} {:>10} {:>12} {:>8}".format(
+            group, d["_itype"], str(d.get("implementation"))[:22],
+            "yes" if native_so else "NO",
+            d.get("compressionRatio", "?"), d.get("compressMiBPerSecond", "?"),
+            "ok" if ok else "FAIL"))
+        if not native_so:
+            failures.append(group + ": lz4 未使用原生 .so（退回纯 Java）")
+        if not ok:
+            failures.append(group + ": lz4 往返校验或 xxHash 不一致")
+
+if native:
+    print()
+    print("   自研 libarchdemo_native.so（纯标量 C，无 SIMD，经 JNI 调用）")
+    print("   {:<11} {:<14} {:>7} {:>10} {:>10} {:>12} {:>12}".format(
+        "GROUP", "INSTANCE-TYPE", "可用", "so架构", "架构匹配",
+        "crc32MiB/s", "fnv1aMiB/s"))
+    for d in native:
+        group = d["_group"]
+        avail = d.get("available")
+        match = d.get("archMatchesJvm")
+        crc = (d.get("crc32") or {}).get("miBPerSecond", "?")
+        fnv = (d.get("fnv1a64") or {}).get("miBPerSecond", "?")
+        print("   {:<11} {:<14} {:>7} {:>10} {:>10} {:>12} {:>12}".format(
+            group, d["_itype"], "yes" if avail else "NO",
+            str(d.get("nativeArch", "-")), "ok" if match else "MISMATCH",
+            crc, fnv))
+        if not avail:
+            failures.append(group + ": JNI 库未加载（" + str(d.get("loadError", "未知原因")) + "）")
+        elif not match:
+            failures.append(group + ": .so 架构(" + str(d.get("nativeArch")) + ") 与 JVM 架构不一致")
+
+print()
+if failures:
+    print("   [FAIL] 原生依赖检查未通过：")
+    for item in failures:
+        print("          - " + item)
+    sys.exit(1)
+print("   [ok] 两种架构都加载了匹配自身架构的原生库，压缩往返校验通过。")
+print("   要点：lz4-java 由上游打包好 aarch64，自研 .so 需要自己在构建镜像时按架构编译。")
+' || verify_failed=1
+  else
+    printf '%s\n' "${native_raw}"
+  fi
+fi
+
 log "本地访问服务：kubectl -n ${NAMESPACE} port-forward svc/java-arch-demo 8080:80  然后打开 http://localhost:8080/"
+
+if [[ "${verify_failed}" -ne 0 ]]; then
+  die "原生依赖检查未通过，详见上面的 [FAIL] 列表"
+fi

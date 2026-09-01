@@ -132,6 +132,112 @@ print("   Python 的 threads>1 用多进程（GIL 限制），Go 用 goroutine�
   fi
 fi
 
+# ---------- 6) CGO 原生库 + C++ SIMD 分支 ----------
+# 断言项：
+#   - archMatchesGo=false 说明 CGO 链接到了错误架构的 .so
+#   - resultsMatch=false  说明 SIMD 分支与标量参考实现结果不一致（最严重）
+#   - 两种架构的 simdPath 必须不同，否则说明预编译宏没有按架构分支
+verify_failed=0
+
+if [[ "${#targets[@]}" -eq 0 ]]; then
+  warn "6) 没有运行中的 Pod，跳过原生库与 SIMD 检查"
+else
+  log "6) CGO 自研库（libgodemo_native.so）与 C++ SIMD 分支检查"
+
+  probe_cmd=""
+  for t in "${targets[@]}"; do
+    IFS='|' read -r group itype ip <<<"${t}"
+    probe_cmd+="printf 'cgo|%s|%s|' '${group}' '${itype}'; "
+    probe_cmd+="wget -qO- 'http://${ip}:8080/api/native?iterations=20000&sizeBytes=4096' | tr -d '\n '; echo; "
+    probe_cmd+="printf 'simd|%s|%s|' '${group}' '${itype}'; "
+    probe_cmd+="wget -qO- 'http://${ip}:8080/api/simd?bytes=1048576&iterations=200' | tr -d '\n '; echo; "
+  done
+
+  native_raw="$(run_probe polyglot-native-probe "${probe_cmd}" || true)"
+
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "${native_raw}" | python3 -c '
+import json, sys
+
+cgo, simd = [], []
+for line in sys.stdin:
+    parts = line.strip().split("|", 3)
+    if len(parts) != 4 or not parts[3].startswith("{"):
+        continue
+    kind, group, itype, payload = parts
+    try:
+        d = json.loads(payload)
+    except json.JSONDecodeError:
+        continue
+    if kind == "simd":
+        # Go 前门把 C++ 的输出包在 result 里，顶层另有 compiledSimdPath / osArch
+        inner = d.get("result") or {}
+        merged = dict(inner)
+        merged.setdefault("simdPath", d.get("compiledSimdPath"))
+        merged["_error"] = d.get("error")
+        d = merged
+    d["_group"], d["_itype"] = group, itype
+    (cgo if kind == "cgo" else simd).append(d)
+
+failures = []
+
+if cgo:
+    print()
+    print("   CGO 调用自研 C 库（纯标量，无 SIMD，按架构分别编译）")
+    print("   {:<11} {:<14} {:>7} {:>10} {:>10} {:<32}".format(
+        "GROUP", "INSTANCE-TYPE", "CGO", "so架构", "架构匹配", "NATIVE-INFO"))
+    for d in cgo:
+        group = d["_group"]
+        match = d.get("archMatchesGo")
+        print("   {:<11} {:<14} {:>7} {:>10} {:>10} {:<32}".format(
+            group, d["_itype"], "on" if d.get("cgoEnabled") else "OFF",
+            str(d.get("nativeArch", "-")), "ok" if match else "MISMATCH",
+            str(d.get("nativeInfo", ""))[:32]))
+        if not d.get("cgoEnabled"):
+            failures.append(group + ": CGO 未启用")
+        elif not match:
+            failures.append(group + ": .so 架构(" + str(d.get("nativeArch")) + ") 与 goArch 不一致")
+
+if simd:
+    print()
+    print("   C++ SIMD：同一份源码用预编译宏按架构分支，与标量实现对比")
+    print("   {:<11} {:<14} {:<22} {:>10} {:>10} {:>8} {:>8}".format(
+        "GROUP", "INSTANCE-TYPE", "SIMD-PATH", "SIMD GiB/s", "标量 GiB/s",
+        "加速比", "结果一致"))
+    for d in simd:
+        group = d["_group"]
+        if d.get("_error"):
+            print("   [失败] {:<10} SIMD 接口报错：{}".format(group, d["_error"]))
+            failures.append(group + ": SIMD 接口报错 " + str(d["_error"]))
+            continue
+        matches = d.get("resultsMatch")
+        print("   {:<11} {:<14} {:<22} {:>10} {:>10} {:>7}x {:>8}".format(
+            group, d["_itype"], str(d.get("simdPath", "?"))[:22],
+            d.get("simdGiBPerSecond", "?"), d.get("scalarGiBPerSecond", "?"),
+            d.get("speedup", "?"), "ok" if matches else "MISMATCH"))
+        if not matches:
+            failures.append(group + ": SIMD 结果与标量参考实现不一致")
+
+    paths = {d["_group"]: d.get("simdPath") for d in simd if not d.get("_error")}
+    if len(paths) > 1 and len(set(paths.values())) == 1:
+        failures.append("两种架构的 simdPath 相同(" + str(list(paths.values())[0]) +
+                        ")，预编译宏没有按架构分支")
+
+print()
+if failures:
+    print("   [FAIL] 原生库 / SIMD 检查未通过：")
+    for item in failures:
+        print("          - " + item)
+    sys.exit(1)
+print("   [ok] CGO 库架构匹配，SIMD 与标量结果一致。")
+print("   要点：x86 走 SSE2/AVX2、arm64 走 NEON，是同一份 .cpp 由预编译宏分支出来的，")
+print("         两边算出的结果必须完全一致——这正是 SIMD 迁移要验证的核心。")
+' || verify_failed=1
+  else
+    printf '%s\n' "${native_raw}"
+  fi
+fi
+
 cat <<EOF
 
 只测单核（对比单线程标量性能）：
@@ -139,4 +245,10 @@ cat <<EOF
 
 本地访问：
   kubectl -n ${NAMESPACE} port-forward svc/polyglot-arch-demo 8081:80
+  curl -s 'localhost:8081/api/native' | jq   # CGO 自研库
+  curl -s 'localhost:8081/api/simd'   | jq   # SIMD 分支与标量对比
 EOF
+
+if [[ "${verify_failed}" -ne 0 ]]; then
+  die "原生库 / SIMD 检查未通过，详见上面的 [FAIL] 列表"
+fi
