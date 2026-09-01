@@ -290,7 +290,23 @@ clean_failed_nodegroup_stack() {
   [[ -n "${status}" && "${status}" != "None" ]] || return 0
   case "${status}" in
     ROLLBACK_COMPLETE|CREATE_FAILED|ROLLBACK_FAILED|DELETE_FAILED)
-      warn "发现上次失败留下的 CloudFormation 栈 ${stack}（${status}），先删除它再重建"
+      # 删之前先确认这个栈里没有存活资源：回滚完成的栈，资源应该全是 DELETE_COMPLETE。
+      # 万一还有资源没删掉（DELETE_FAILED 常见），宁可报错退出也不要硬删。
+      local live
+      live="$(aws cloudformation describe-stack-resources --stack-name "${stack}" \
+        --region "${AWS_REGION}" \
+        --query "length(StackResources[?ResourceStatus!='DELETE_COMPLETE'])" \
+        --output text 2>/dev/null || echo unknown)"
+      [[ "${live}" == "0" ]] || die "栈 ${stack} 处于 ${status}，但里面还有 ${live} 个未删除的资源，
+不自动删除以免误伤。请先人工确认这些资源再决定：
+  aws cloudformation describe-stack-resources --stack-name ${stack} --region ${AWS_REGION}"
+
+      warn "发现上次失败留下的 CloudFormation 栈 ${stack}（${status}，资源已全部回滚）"
+      # eksctl 建的栈默认开启终止保护，不关掉无法删除
+      warn "关闭该栈的终止保护并删除它（空壳栈，不影响任何存活资源）"
+      aws cloudformation update-termination-protection --stack-name "${stack}" \
+        --no-enable-termination-protection --region "${AWS_REGION}" >/dev/null \
+        || warn "关闭终止保护失败，仍尝试删除"
       aws cloudformation delete-stack --stack-name "${stack}" --region "${AWS_REGION}"
       aws cloudformation wait stack-delete-complete --stack-name "${stack}" \
         --region "${AWS_REGION}" 2>/dev/null || warn "等待栈删除超时，请到 CloudFormation 控制台确认"

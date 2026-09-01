@@ -767,7 +767,10 @@ DELETE_ECR=true DELETE_CLUSTER=true ./scripts/90-cleanup.sh
 2. 架构映射成显式的 `--ami-type`（`AL2023_ARM_64_STANDARD` / `AL2023_x86_64_STANDARD`）
 3. 用 `aws eks create-nodegroup` 创建，nodeRole 与子网继承自集群已有的节点组
    （不额外建 IAM 角色，也保证与现有节点同子网）
-4. `clean_failed_nodegroup_stack()` 会清掉上次失败留下的 `ROLLBACK_COMPLETE` 栈再重建
+4. `clean_failed_nodegroup_stack()` 会清掉上次失败留下的 `ROLLBACK_COMPLETE` 栈再重建。
+   eksctl 给它建的栈默认**开启终止保护**，直接 `delete-stack` 会报
+   `cannot be deleted while TerminationProtection is enabled`，所以要先关保护再删。
+   删之前会校验栈里的资源是否已全部 `DELETE_COMPLETE`，只要还有存活资源就报错退出、不硬删
 
 这样任何新机型家族都不会再踩坑，代价是这一步不再由 eksctl 配置文件驱动。
 如果你的机型 eksctl 本来就认识（c6g/c7g/c8g），可以走原来的 eksctl 路径：
