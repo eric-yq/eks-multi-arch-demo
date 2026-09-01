@@ -1,9 +1,18 @@
 package com.example.archdemo;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import net.jpountz.lz4.LZ4Compressor;
 import net.jpountz.lz4.LZ4Factory;
@@ -85,44 +94,68 @@ public class Lz4Service {
     }
 
     /**
-     * 压缩 / 解压往返，并校验数据一致。
+     * 压缩 / 解压往返，并校验数据一致。多线程执行，用于体现多核（尤其 Graviton 的物理核）优势。
      *
-     * @param sizeBytes  测试数据大小
-     * @param iterations 往返轮数
+     * <p>压缩与解压拆成两个独立的并行阶段分别计时：如果在一个循环里交替做两件事，
+     * 墙钟时间就无法归给某一个方向，聚合吞吐会算错。
+     *
+     * <p>线程安全：{@link LZ4Compressor} / {@link LZ4FastDecompressor} 本身无状态可共享，
+     * 但输出缓冲区必须每线程各一份；源数据只读，可以共享。
+     *
+     * @param sizeBytes  每线程测试数据大小
+     * @param iterations 每线程往返轮数
+     * @param threads    并发线程数
      */
-    public Map<String, Object> roundTrip(int sizeBytes, int iterations) {
+    public Map<String, Object> roundTrip(int sizeBytes, int iterations, int threads) {
         byte[] source = buildPayload(sizeBytes);
 
         LZ4Compressor compressor = factory.fastCompressor();
         LZ4FastDecompressor decompressor = factory.fastDecompressor();
-
         int maxCompressedLength = compressor.maxCompressedLength(source.length);
-        byte[] compressed = new byte[maxCompressedLength];
-        byte[] restored = new byte[source.length];
 
-        // 预热，避免首轮 JIT / 原生库首次调用影响吞吐
-        int warmupLength = compressor.compress(source, 0, source.length, compressed, 0, maxCompressedLength);
-        decompressor.decompress(compressed, 0, restored, 0, source.length);
+        // 每线程独立的输出缓冲
+        byte[][] compressedBuffers = new byte[threads][maxCompressedLength];
+        byte[][] restoredBuffers = new byte[threads][source.length];
 
-        long compressNanos = 0;
-        long decompressNanos = 0;
-        int compressedLength = warmupLength;
-
-        for (int i = 0; i < iterations; i++) {
-            long t0 = System.nanoTime();
-            compressedLength = compressor.compress(source, 0, source.length, compressed, 0, maxCompressedLength);
-            long t1 = System.nanoTime();
-            decompressor.decompress(compressed, 0, restored, 0, source.length);
-            long t2 = System.nanoTime();
-            compressNanos += t1 - t0;
-            decompressNanos += t2 - t1;
+        // 预热 + 往返正确性校验（不计入吞吐）
+        boolean roundTripOk = true;
+        boolean xxHashOk = true;
+        int compressedLength = 0;
+        for (int t = 0; t < threads; t++) {
+            compressedLength = compressor.compress(source, 0, source.length,
+                    compressedBuffers[t], 0, maxCompressedLength);
+            decompressor.decompress(compressedBuffers[t], 0, restoredBuffers[t], 0, source.length);
+            roundTripOk &= java.util.Arrays.equals(source, restoredBuffers[t]);
+            long sourceHash = xxHashFactory.hash64().hash(source, 0, source.length, 0L);
+            long restoredHash = xxHashFactory.hash64().hash(restoredBuffers[t], 0, restoredBuffers[t].length, 0L);
+            xxHashOk &= sourceHash == restoredHash;
         }
 
-        boolean roundTripOk = java.util.Arrays.equals(source, restored);
-        long sourceHash = xxHashFactory.hash64().hash(source, 0, source.length, 0L);
-        long restoredHash = xxHashFactory.hash64().hash(restored, 0, restored.length, 0L);
+        final int finalCompressedLength = compressedLength;
+        ExecutorService pool = Executors.newFixedThreadPool(threads, workerFactory());
+        long compressWallNanos;
+        long decompressWallNanos;
+        try {
+            // 阶段一：只压缩
+            compressWallNanos = runPhase(pool, threads, idx -> {
+                for (int i = 0; i < iterations; i++) {
+                    compressor.compress(source, 0, source.length,
+                            compressedBuffers[idx], 0, maxCompressedLength);
+                }
+            });
+            // 阶段二：只解压
+            decompressWallNanos = runPhase(pool, threads, idx -> {
+                for (int i = 0; i < iterations; i++) {
+                    decompressor.decompress(compressedBuffers[idx], 0,
+                            restoredBuffers[idx], 0, source.length);
+                }
+            });
+        } finally {
+            pool.shutdownNow();
+        }
 
-        double totalMiB = (double) source.length * iterations / (1024 * 1024);
+        // 聚合吞吐：所有线程合计处理的数据量 ÷ 墙钟耗时
+        double totalMiB = (double) source.length * iterations * threads / (1024 * 1024);
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("library", "lz4-java 1.8.0");
@@ -131,17 +164,61 @@ public class Lz4Service {
         result.put("fastestInstanceWouldPick", fastestInstanceName());
         result.put("nativeLoadNote", nativeLoadNote());
         result.put("xxHashImplementation", xxHashImplementation());
+        result.put("mode", threads == 1 ? "single-thread" : "multi-thread");
+        result.put("threads", threads);
+        result.put("availableProcessors", Runtime.getRuntime().availableProcessors());
+        result.put("iterationsPerThread", iterations);
         result.put("iterations", iterations);
         result.put("originalBytes", source.length);
-        result.put("compressedBytes", compressedLength);
-        result.put("compressionRatio", round2((double) source.length / compressedLength));
-        result.put("compressMillis", round2(compressNanos / 1_000_000.0));
-        result.put("decompressMillis", round2(decompressNanos / 1_000_000.0));
-        result.put("compressMiBPerSecond", throughput(totalMiB, compressNanos));
-        result.put("decompressMiBPerSecond", throughput(totalMiB, decompressNanos));
+        result.put("compressedBytes", finalCompressedLength);
+        result.put("totalMiBProcessed", round2(totalMiB));
+        result.put("compressionRatio", round2((double) source.length / finalCompressedLength));
+        result.put("compressMillis", round2(compressWallNanos / 1_000_000.0));
+        result.put("decompressMillis", round2(decompressWallNanos / 1_000_000.0));
+        result.put("compressMiBPerSecond", throughput(totalMiB, compressWallNanos));
+        result.put("decompressMiBPerSecond", throughput(totalMiB, decompressWallNanos));
+        result.put("compressMiBPerSecondPerThread", throughput(totalMiB / threads, compressWallNanos));
         result.put("roundTripVerified", roundTripOk);
-        result.put("xxHashMatch", sourceHash == restoredHash);
+        result.put("xxHashMatch", xxHashOk);
         return result;
+    }
+
+    /** 让所有线程同时跑同一段负载，返回墙钟耗时 */
+    static long runPhase(ExecutorService pool, int threads, IntConsumerWithIndex body) {
+        List<Callable<Void>> tasks = new ArrayList<>(threads);
+        for (int i = 0; i < threads; i++) {
+            final int idx = i;
+            tasks.add(() -> {
+                body.accept(idx);
+                return null;
+            });
+        }
+        long start = System.nanoTime();
+        try {
+            for (Future<Void> future : pool.invokeAll(tasks)) {
+                future.get();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("压测被中断", e);
+        } catch (ExecutionException e) {
+            throw new IllegalStateException("压测执行失败", e.getCause());
+        }
+        return System.nanoTime() - start;
+    }
+
+    static ThreadFactory workerFactory() {
+        AtomicInteger seq = new AtomicInteger();
+        return runnable -> {
+            Thread thread = new Thread(runnable, "native-bench-" + seq.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        };
+    }
+
+    /** 带线程序号的任务体，序号用于取该线程专属的缓冲区 */
+    interface IntConsumerWithIndex {
+        void accept(int index);
     }
 
     /** 构造可压缩的测试数据：重复文本 + 少量随机噪声，压缩率更接近真实日志 */

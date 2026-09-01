@@ -163,6 +163,8 @@ kubectl get nodes -L kubernetes.io/arch,node.kubernetes.io/instance-type,eks.ama
 | `GET /` | 纯文本汇总：CPU 架构、JVM、Pod、Node、节点组、实例类型、原生依赖 |
 | `GET /api/info` | 同样的信息，JSON 格式，便于脚本统计架构分布 |
 | `GET /api/bench?iterations=2000000&threads=4` | SHA-256 循环，单核/多核两种口径 |
+| `GET /api/compress?sizeBytes=262144&iterations=30&threads=4` | lz4 压缩/解压，多线程聚合吞吐 |
+| `GET /api/native?iterations=20000&sizeBytes=4096&threads=4` | 自研 JNI 库 crc32 / fnv1a，多线程聚合吞吐 |
 | `GET /api/compress?sizeBytes=262144&iterations=50` | lz4 压缩/解压往返、压缩率、吞吐 |
 | `GET /api/native?iterations=20000&sizeBytes=4096` | 经 JNI 调用自研 C 库（CRC-32 / FNV-1a） |
 | `GET /actuator/health/{liveness,readiness}` | 给 k8s 探针用 |
@@ -178,6 +180,11 @@ kubectl get nodes -L kubernetes.io/arch,node.kubernetes.io/instance-type,eks.ama
 
 `archMatchesJvm` 是关键断言：`.so` 的编译期宏与 JVM 的 `os.arch` 一致，
 才能证明加载到的是当前架构的库，而不是碰巧能跑起来。
+
+两个接口都支持 `threads` 参数（不传 = 容器可见 vCPU 数），吞吐是多线程聚合值。
+压缩与解压拆成两个独立的并行阶段分别计时——在一个循环里交替做两件事的话，
+墙钟时间无法归给某个方向，聚合吞吐会算错。`05-verify.sh` 第 6 步默认按多核跑，
+因为单核口径会系统性低估 Graviton（核多、每核便宜是它的主要优势来源）。
 
 > **lz4 有个坑值得单独讲。** `LZ4Factory.fastestInstance()` 在 Spring Boot fat jar 下
 > **不会**选 JNI 实现：lz4-java 要求 `Native` 类由 system classloader 加载，而 fat jar 用的是
@@ -363,10 +370,49 @@ Graviton 部分在步骤 6。
 
 ```
 ==> 5) 粗略 CPU 对比：2 个分组 × 2000000 次 SHA-256（仅供参考，非正式基准测试）
-   GROUP       INSTANCE-TYPE  OS-ARCH       耗时(ms)          ops/s       相对    vCPU
-   amd64       c6a.xlarge     amd64         148.36     13,481,043     100%       1
-   arm64       c7g.xlarge     aarch64       191.55     10,441,234      77%       1
+
+   单核（threads=1）—— 反映单线程标量性能
+   GROUP       INSTANCE-TYPE  OS-ARCH    THREADS     耗时(ms)          ops/s       相对
+   amd64       c6a.xlarge     amd64            1     143.25     13,961,264     100%
+   arm64       c7g.xlarge     aarch64          1     167.46     11,943,113      86%
+
+   多核（threads = 容器可见 vCPU）—— 反映整机吞吐
+   GROUP       INSTANCE-TYPE  OS-ARCH    THREADS     耗时(ms)          ops/s       相对
+   arm64       c7g.xlarge     aarch64          4     162.18     49,327,232     100%
+   amd64       c6a.xlarge     amd64            4     246.42     32,464,394      66%
+
+   多核加速比（多核 ops/s ÷ 单核 ops/s，理想值 = 线程数）
+   GROUP       INSTANCE-TYPE   THREADS          加速比         效率
+   amd64       c6a.xlarge            4        2.33x        58%
+   arm64       c7g.xlarge            4        4.13x       103%
 ```
+
+**结论会随口径翻转，这是整个对比里最值得讲的一点**：单核 x86 领先 16%，
+多核 Graviton 反超 52%。原因在加速比那张表里——c6a.xlarge 的 4 vCPU 是
+2 个物理核开 SMT（加速比 2.33x），c7g.xlarge 的 4 vCPU 是 4 个真实物理核（4.13x）。
+所以容器的 `limits.cpu` 必须给到全部 vCPU，否则 cgroup 配额会把多线程压回单核，
+量出来的就只是单核结论。
+
+第 6 步的原生依赖检查同样按多核跑（实测）：
+
+```
+==> 6) 原生依赖检查（...），threads = 容器可见 vCPU
+   lz4-java（jar 内置各架构 .so）
+   GROUP       INSTANCE-TYPE  IMPLEMENTATION   原生so  THREADS    压缩率   压缩MiB/s  往返校验
+   amd64       c6a.xlarge     LZ4Factory:JNI      yes        4     48.44        7568       ok
+   arm64       c7g.xlarge     LZ4Factory:JNI      yes        4     46.19        9870       ok
+
+   自研 libarchdemo_native.so（纯标量 C，无 SIMD，经 JNI 调用）
+   GROUP       INSTANCE-TYPE   可用   so架构  架构匹配  THREADS  crc32MiB/s  fnv1aMiB/s
+   amd64       c6a.xlarge       yes    amd64        ok        4        1619        2636
+   arm64       c7g.xlarge       yes    arm64        ok        4        1383        3092
+```
+
+多线程下 lz4 压缩 Graviton 领先 30%（c7g 是 DDR5，lz4 在这个数据尺寸上偏内存带宽敏感），
+自研库的 fnv1a 领先 17%。但 **crc32 仍是 x86 领先 17%**——它是逐字节查表、
+存在串行依赖链的负载，这类"延迟受限"的代码更吃主频（EPYC 约 3.6GHz vs Graviton3 约 2.6GHz），
+多核也补不回来。这个反例保留在 demo 里是有意的：不是所有负载都适合 Graviton，
+给客户一个可信的判断依据比一张全绿的表更有说服力。
 
 新增节点组后不用改脚本：分组是从 Pod 的 `arch` 标签自动枚举出来的。
 压测前每组会先跑一轮并丢弃结果——JIT 编译只发生在首次调用，否则"冷"的那一组会明显偏慢

@@ -180,15 +180,25 @@ verify_failed=0
 if [[ "${#targets[@]}" -eq 0 ]]; then
   warn "6) 没有运行中的 Pod，跳过原生依赖检查"
 else
-  log "6) 原生依赖检查（lz4-java 第三方 .so + 自研 libarchdemo_native.so via JNI）"
+  thread_desc="容器可见 vCPU"
+  [[ "${BENCH_THREADS:-0}" != "0" ]] && thread_desc="${BENCH_THREADS}"
+  log "6) 原生依赖检查（lz4-java 第三方 .so + 自研 libarchdemo_native.so via JNI），threads = ${thread_desc}"
+
+  # 两个接口都走多线程：每线程各跑 iterations 轮，吞吐为聚合值。
+  # 不传 threads 时服务端取容器可见 vCPU 数，这样多核优势才体现得出来。
+  thread_param=""
+  [[ "${BENCH_THREADS:-0}" != "0" ]] && thread_param="&threads=${BENCH_THREADS}"
 
   probe_cmd=""
   for t in "${targets[@]}"; do
     IFS='|' read -r group itype ip _pod <<<"${t}"
+    # 先各打一次丢弃：JIT 与 JNI 首次调用、原生库首次解压加载都在这一轮完成
+    probe_cmd+="wget -qO- 'http://${ip}:8080/api/compress?sizeBytes=262144&iterations=10${thread_param}' >/dev/null 2>&1; "
     probe_cmd+="printf 'compress|%s|%s|' '${group}' '${itype}'; "
-    probe_cmd+="wget -qO- 'http://${ip}:8080/api/compress?sizeBytes=262144&iterations=30' | tr -d '\n '; echo; "
+    probe_cmd+="wget -qO- 'http://${ip}:8080/api/compress?sizeBytes=262144&iterations=30${thread_param}' | tr -d '\n '; echo; "
+    probe_cmd+="wget -qO- 'http://${ip}:8080/api/native?iterations=2000&sizeBytes=4096${thread_param}' >/dev/null 2>&1; "
     probe_cmd+="printf 'native|%s|%s|' '${group}' '${itype}'; "
-    probe_cmd+="wget -qO- 'http://${ip}:8080/api/native?iterations=20000&sizeBytes=4096' | tr -d '\n '; echo; "
+    probe_cmd+="wget -qO- 'http://${ip}:8080/api/native?iterations=20000&sizeBytes=4096${thread_param}' | tr -d '\n '; echo; "
   done
 
   native_raw="$(run_probe native-probe "${probe_cmd}" || true)"
@@ -215,16 +225,16 @@ failures = []
 if compress:
     print()
     print("   lz4-java（jar 内置各架构 .so，代表上游已适配 aarch64 的第三方依赖）")
-    print("   {:<11} {:<14} {:<22} {:>7} {:>10} {:>12} {:>8}".format(
-        "GROUP", "INSTANCE-TYPE", "IMPLEMENTATION", "原生so", "压缩率",
+    print("   {:<11} {:<14} {:<22} {:>7} {:>8} {:>10} {:>12} {:>8}".format(
+        "GROUP", "INSTANCE-TYPE", "IMPLEMENTATION", "原生so", "THREADS", "压缩率",
         "压缩MiB/s", "往返校验"))
     for d in compress:
         group = d["_group"]
         native_so = d.get("usingNativeSo")
         ok = d.get("roundTripVerified") and d.get("xxHashMatch")
-        print("   {:<11} {:<14} {:<22} {:>7} {:>10} {:>12} {:>8}".format(
+        print("   {:<11} {:<14} {:<22} {:>7} {:>8} {:>10} {:>12} {:>8}".format(
             group, d["_itype"], str(d.get("implementation"))[:22],
-            "yes" if native_so else "NO",
+            "yes" if native_so else "NO", d.get("threads", "?"),
             d.get("compressionRatio", "?"), d.get("compressMiBPerSecond", "?"),
             "ok" if ok else "FAIL"))
         if not native_so:
@@ -235,8 +245,8 @@ if compress:
 if native:
     print()
     print("   自研 libarchdemo_native.so（纯标量 C，无 SIMD，经 JNI 调用）")
-    print("   {:<11} {:<14} {:>7} {:>10} {:>10} {:>12} {:>12}".format(
-        "GROUP", "INSTANCE-TYPE", "可用", "so架构", "架构匹配",
+    print("   {:<11} {:<14} {:>7} {:>10} {:>10} {:>8} {:>12} {:>12}".format(
+        "GROUP", "INSTANCE-TYPE", "可用", "so架构", "架构匹配", "THREADS",
         "crc32MiB/s", "fnv1aMiB/s"))
     for d in native:
         group = d["_group"]
@@ -244,10 +254,10 @@ if native:
         match = d.get("archMatchesJvm")
         crc = (d.get("crc32") or {}).get("miBPerSecond", "?")
         fnv = (d.get("fnv1a64") or {}).get("miBPerSecond", "?")
-        print("   {:<11} {:<14} {:>7} {:>10} {:>10} {:>12} {:>12}".format(
+        print("   {:<11} {:<14} {:>7} {:>10} {:>10} {:>8} {:>12} {:>12}".format(
             group, d["_itype"], "yes" if avail else "NO",
             str(d.get("nativeArch", "-")), "ok" if match else "MISMATCH",
-            crc, fnv))
+            d.get("threads", "?"), crc, fnv))
         if not avail:
             failures.append(group + ": JNI 库未加载（" + str(d.get("loadError", "未知原因")) + "）")
         elif not match:
@@ -261,6 +271,8 @@ if failures:
     sys.exit(1)
 print("   [ok] 两种架构都加载了匹配自身架构的原生库，压缩往返校验通过。")
 print("   要点：lz4-java 由上游打包好 aarch64，自研 .so 需要自己在构建镜像时按架构编译。")
+print("   吞吐均为多线程聚合值（每线程各跑 iterations 轮），压缩与解压分两个并行阶段各自计时；")
+print("   想看单核口径：BENCH_THREADS=1 ./scripts/05-verify.sh")
 ' || verify_failed=1
   else
     printf '%s\n' "${native_raw}"
