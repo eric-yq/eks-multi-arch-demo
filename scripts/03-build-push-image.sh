@@ -30,13 +30,36 @@ if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
   docker buildx create --name "${BUILDER_NAME}" --driver docker-container --bootstrap >/dev/null
 fi
 
+# ---------- QEMU 检查 ----------
+# app/Dockerfile 里有 native-builder 阶段要编译 JNI 的 .so，这个 RUN 必须在目标架构下执行。
+# 跨架构构建时依赖宿主机注册的 binfmt handler（QEMU），否则该阶段会失败。
+host="$(host_arch)"
+for platform in ${PLATFORMS//,/ }; do
+  target_arch="${platform##*/}"
+  [[ "${target_arch}" == "${host}" ]] && continue
+  qemu_handler="qemu-aarch64"
+  [[ "${target_arch}" == "amd64" ]] && qemu_handler="qemu-x86_64"
+  if [[ ! -e "/proc/sys/fs/binfmt_misc/${qemu_handler}" ]]; then
+    warn "要构建 ${platform}，但宿主机没有注册 ${qemu_handler}。"
+    warn "本镜像含 JNI 原生库，native-builder 阶段需要在目标架构下执行，缺少 QEMU 会失败。"
+    warn "二选一："
+    warn "  1) 注册 QEMU：docker run --privileged --rm tonistiigi/binfmt --install ${target_arch}"
+    warn "  2) 改用各架构原生构建（更快，推荐）："
+    warn "     在 x86 与 Graviton 实例上分别跑 ./scripts/03a-build-push-native.sh，"
+    warn "     再执行 ./scripts/03b-create-manifest-list.sh 合并"
+    die "缺少 ${qemu_handler}，已中止"
+  fi
+  log "已检测到 ${qemu_handler}，可跨架构构建 ${platform}"
+done
+
 # ---------- ECR 仓库与登录 ----------
 ensure_ecr_repo
 ecr_login
 
 # ---------- 构建并推送 ----------
-# 本 Dockerfile 只有 FROM/COPY/ENV，没有需要目标架构执行的 RUN，
-# 因此在 x86 机器上交叉构建 arm64 镜像不需要 QEMU。
+# 注意：镜像里含 JNI 原生库（libarchdemo_native.so），native-builder 阶段的 RUN
+# 必须在目标架构下执行，跨架构时走 QEMU 模拟（上面已检查）。
+# 想完全避开模拟，请改用 03a + 03b 的各架构原生构建路径。
 log "构建并推送多架构镜像：${IMAGE_URI}    平台：${PLATFORMS}"
 docker buildx build \
   --builder "${BUILDER_NAME}" \

@@ -3,3 +3,4 @@
 **/*.pyc
 go/polyglot-server
 cpp/bench-cpp
+cgo/out/

@@ -73,6 +73,8 @@ func main() {
 	mux.HandleFunc("/", handleHome)
 	mux.HandleFunc("/api/info", handleInfo)
 	mux.HandleFunc("/api/bench", handleBench)
+	mux.HandleFunc("/api/native", handleNative)
+	mux.HandleFunc("/api/simd", handleSimd)
 	mux.HandleFunc("/healthz", handleHealth)
 	mux.HandleFunc("/readyz", handleHealth)
 
@@ -112,6 +114,11 @@ CPU 架构 (GOARCH)   : %s
 Go                  : %s
 Python              : %s
 C++                 : %s
+------------------------------------------------------------
+原生依赖 / SIMD
+  CGO 自研 C 库     : %s
+  C++ SIMD 路径     : %s
+------------------------------------------------------------
 Pod                 : %s
 Node                : %s
 节点组              : %s
@@ -120,9 +127,12 @@ Node                : %s
 JSON 信息 : /api/info
 三语言压测: /api/bench?lang=all&iterations=2000000
 单语言压测: /api/bench?lang=go|python|cpp&threads=1
+CGO 原生库: /api/native
+C++ SIMD  : /api/simd?bytes=1048576&iterations=200
 `,
 		runtime.GOARCH, platformLabel(), runtime.NumCPU(), effectiveCPUs,
 		runtimeVersions["go"], runtimeVersions["python"], runtimeVersions["cpp"],
+		runtimeVersions["cgoNative"], runtimeVersions["cppSimd"],
 		envOr("POD_NAME", "n/a"), envOr("NODE_NAME", "n/a"),
 		envOr("NODE_GROUP", "n/a"), envOr("NODE_INSTANCE_TYPE", "n/a"))
 }
@@ -146,6 +156,14 @@ func handleInfo(w http.ResponseWriter, _ *http.Request) {
 			"go":     runtimeVersions["go"],
 			"python": runtimeVersions["python"],
 			"cpp":    runtimeVersions["cpp"],
+		},
+		"nativeDependencies": map[string]any{
+			// 自研 C 库，经 CGO 链接；必须按架构分别编译
+			"cgoLib":     runtimeVersions["cgoNative"],
+			"cgoLibArch": nativeLibArch(),
+			"cgoEnabled": true,
+			// C++ 侧编译期选中的 SIMD 指令集
+			"cppSimdPath": runtimeVersions["cppSimd"],
 		},
 		"resources": map[string]any{
 			"hostCPUs":      runtime.NumCPU(),
@@ -280,6 +298,99 @@ func collectVersions() {
 		runtimeVersions["go"] = runtime.Version()
 		runtimeVersions["python"] = firstLine(runCapture("python3", pythonBench, "--version"))
 		runtimeVersions["cpp"] = firstLine(runCapture(cppBench, "--version"))
+		// C++ 侧编译期选中的 SIMD 路径（x86 SSE2/AVX2 或 arm64 NEON）
+		runtimeVersions["cppSimd"] = firstLine(runCapture(cppBench, "--simd-path"))
+		// 自研 C 库（CGO 链接）的编译期信息
+		runtimeVersions["cgoNative"] = nativeLibInfo()
+	})
+}
+
+// handleNative：通过 CGO 调用自研 C 库 libgodemo_native.so
+func handleNative(w http.ResponseWriter, r *http.Request) {
+	iterations, err := intParam(r, "iterations", 20000)
+	if err != nil || iterations < 1 || iterations > 5_000_000 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "iterations 必须在 1 和 5000000 之间",
+		})
+		return
+	}
+	sizeBytes, err := intParam(r, "sizeBytes", 4096)
+	if err != nil || sizeBytes < 64 || sizeBytes > 8<<20 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "sizeBytes 必须在 64 和 8388608 之间",
+		})
+		return
+	}
+
+	payload := make([]byte, sizeBytes)
+	for i := range payload {
+		payload[i] = byte((i*31 + 7) & 0xFF)
+	}
+
+	libArch := nativeLibArch()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"library":       "libgodemo_native.so（自研 C 库，纯标量，无 SIMD，经 CGO 调用）",
+		"cgoEnabled":    true,
+		"nativeInfo":    nativeLibInfo(),
+		"nativeArch":    libArch,
+		"goArch":        runtime.GOARCH,
+		"archMatchesGo": libArch == runtime.GOARCH,
+		"iterations":    iterations,
+		"payloadBytes":  sizeBytes,
+		"results":       runNativeBench(payload, iterations),
+		"platform":      platformLabel(),
+		"podName":       envOr("POD_NAME", "n/a"),
+		"nodeName":      envOr("NODE_NAME", "n/a"),
+		"note":          "nativeArch 来自 .so 的编译期宏，与 goArch 一致才说明链接到了正确架构的库",
+	})
+}
+
+// handleSimd：调用 C++ 二进制的 SIMD 模式，对比 SIMD 与标量实现
+func handleSimd(w http.ResponseWriter, r *http.Request) {
+	bufferBytes, err := intParam(r, "bytes", 1<<20)
+	if err != nil || bufferBytes < 64 || bufferBytes > 64<<20 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "bytes 必须在 64 和 67108864 之间",
+		})
+		return
+	}
+	iterations, err := intParam(r, "iterations", 200)
+	if err != nil || iterations < 1 || iterations > 100000 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "iterations 必须在 1 和 100000 之间",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), benchTimeout)
+	defer cancel()
+
+	out, execErr := exec.CommandContext(ctx, cppBench, "--simd",
+		"--simd-bytes", strconv.Itoa(bufferBytes),
+		"--simd-iterations", strconv.Itoa(iterations)).Output()
+
+	var payload map[string]any
+	if jsonErr := json.Unmarshal(out, &payload); jsonErr != nil {
+		detail := jsonErr.Error()
+		if execErr != nil {
+			detail = execErr.Error()
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "调用 C++ SIMD 压测失败：" + detail,
+		})
+		return
+	}
+
+	// resultsMatch=false 时 C++ 侧会以退出码 1 返回，这里如实透传
+	writeJSON(w, http.StatusOK, map[string]any{
+		"osArch":           runtime.GOARCH,
+		"platform":         platformLabel(),
+		"compiledSimdPath": runtimeVersions["cppSimd"],
+		"result":           payload,
+		"podName":          envOr("POD_NAME", "n/a"),
+		"nodeName":         envOr("NODE_NAME", "n/a"),
+		"nodeInstanceType": envOr("NODE_INSTANCE_TYPE", "n/a"),
+		"note":             "同一份 .cpp 用预编译宏分支：x86 走 SSE2/AVX2，arm64 走 NEON；resultsMatch 校验两条路径结果一致",
 	})
 }
 

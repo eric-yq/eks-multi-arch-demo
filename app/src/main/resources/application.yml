@@ -7,7 +7,7 @@ server:
   shutdown: graceful
 
 demo:
-  version: 1.1.0
+  version: 1.2.0
 
 management:
   endpoints:

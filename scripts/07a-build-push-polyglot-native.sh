@@ -30,7 +30,7 @@ ensure_ecr_repo "${POLYGLOT_ECR_REPO}"
 ecr_login
 
 log "宿主机：$(uname -m)（${ARCH}）    原生构建镜像：${ARCH_TAG}"
-log "构建内容：Go 服务 + C++ 压测二进制（均为原生编译）+ Python 压测脚本"
+log "构建内容：Go 服务（CGO_ENABLED=1）+ 自研 C 库 .so + C++ 压测二进制（含 SIMD）+ Python 脚本"
 
 docker build \
   --build-arg "APP_VERSION=${POLYGLOT_IMAGE_TAG}" \
@@ -45,9 +45,10 @@ log "校验镜像内的架构与各语言运行时"
 docker image inspect "${ARCH_TAG}" --format '   镜像架构: {{.Os}}/{{.Architecture}}'
 docker run --rm --entrypoint sh "${ARCH_TAG}" -c '
   printf "   容器内 uname -m : %s\n" "$(uname -m)"
-  printf "   Go 二进制       : %s\n" "$(file /app/polyglot-server 2>/dev/null || echo "file 命令不可用，跳过")"
   printf "   C++ 运行时      : %s\n" "$(/app/bench-cpp --version)"
+  printf "   C++ SIMD 路径   : %s\n" "$(/app/bench-cpp --simd-path)"
   printf "   Python 运行时   : %s\n" "$(python3 /app/bench.py --version)"
+  printf "   CGO 原生库      : %s\n" "$(ls -l /app/lib/libgodemo_native.so | awk "{print \$5\" bytes\"}")"
 ' 2>/dev/null || warn "镜像内自检失败（不影响已推送的镜像）"
 
 cat <<EOF

@@ -8,14 +8,14 @@ export AWS_DEFAULT_REGION="${AWS_REGION}"
 export CLUSTER_NAME="${CLUSTER_NAME:-multi-arch-demo}"
 export NAMESPACE="${NAMESPACE:-demo}"
 export ECR_REPO="${ECR_REPO:-java-arch-demo}"
-export IMAGE_TAG="${IMAGE_TAG:-1.1.0}"
+export IMAGE_TAG="${IMAGE_TAG:-1.2.0}"
 export PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 export BUILDER_NAME="${BUILDER_NAME:-multiarch-builder}"
 export JAR_NAME="${JAR_NAME:-java-arch-demo.jar}"
 
 # ---- 多语言（Go / Python / C++）服务，独立镜像与独立 ECR 仓库 ----
 export POLYGLOT_ECR_REPO="${POLYGLOT_ECR_REPO:-polyglot-arch-demo}"
-export POLYGLOT_IMAGE_TAG="${POLYGLOT_IMAGE_TAG:-1.0.0}"
+export POLYGLOT_IMAGE_TAG="${POLYGLOT_IMAGE_TAG:-1.1.0}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export REPO_ROOT

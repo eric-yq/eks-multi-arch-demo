@@ -17,20 +17,41 @@
 # 构建脚本：scripts/07a-build-push-polyglot-native.sh（每种架构各跑一次）
 #          scripts/07b-create-polyglot-manifest.sh（合并）
 
-# ---------------- 1) Go：原生编译静态二进制 ----------------
-FROM public.ecr.aws/docker/library/golang:1.27-bookworm AS go-builder
+# ---------------- 1) 自研 C 库：原生编译成 .so（供 Go 经 CGO 调用）----------------
+# 与 go-builder 用同一个基础镜像，保证 gcc / glibc 一致
+FROM public.ecr.aws/docker/library/golang:1.27-bookworm AS cgo-builder
 WORKDIR /src
-COPY go/go.mod ./
-RUN go mod download
-COPY go/ ./
-# CGO_ENABLED=0：纯静态，不依赖运行镜像里的 libc 版本
+COPY cgo/ ./cgo/
+# 纯标量编译：不加 -march 等架构特定优化，同一份源码两种架构都能编
+RUN set -eux; \
+    echo "CGO 依赖库构建架构：$(uname -m)"; \
+    mkdir -p /out/lib; \
+    gcc -O2 -fPIC -shared -Wall -Wextra \
+        -o /out/lib/libgodemo_native.so cgo/godemo_native.c; \
+    ls -l /out/lib/libgodemo_native.so
+
+# ---------------- 2) Go：原生编译，启用 CGO 链接上面的 .so ----------------
+FROM public.ecr.aws/docker/library/golang:1.27-bookworm AS go-builder
+# 目录结构与仓库保持一致（/src/go 与 /src/cgo 并列），
+# 这样 native_cgo.go 里的 ${SRCDIR}/../cgo 在镜像内和本地开发时都能解析到同一个位置
+WORKDIR /src
+COPY go/go.mod ./go/
+RUN cd go && go mod download
+COPY go/ ./go/
+# cgo 需要头文件与 .so：头文件放 cgo/，.so 放 cgo/out/
+COPY cgo/*.h ./cgo/
+COPY --from=cgo-builder /out/lib/libgodemo_native.so ./cgo/out/
+# CGO_ENABLED=1：产物不再是纯静态，会动态链接 glibc 与自研 .so，
+# 因此构建镜像与运行镜像的 glibc 必须兼容（本 demo 两者同为 Debian bookworm）
 RUN set -eux; \
     echo "Go 构建架构：$(uname -m)"; \
     mkdir -p /out; \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/polyglot-server .; \
-    go version
+    cd go; \
+    CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/polyglot-server .; \
+    go version; \
+    ldd /out/polyglot-server || true
 
-# ---------------- 2) C++：原生编译，链接 OpenSSL ----------------
+# ---------------- 3) C++：原生编译，链接 OpenSSL，含按架构分支的 SIMD 代码 ----------------
 # 用 python:3.13-bookworm 作为构建镜像：它自带 g++ 与 OpenSSL 头文件，
 # 不需要 apt-get；而且和运行镜像 python:3.13-slim 同属 bookworm，
 # libcrypto ABI 一致（另外再静态链 libstdc++/libgcc 做双重保险）。
@@ -44,7 +65,7 @@ RUN set -eux; \
         -o /out/bench-cpp bench.cpp -lcrypto; \
     /out/bench-cpp --version
 
-# ---------------- 3) 运行镜像 ----------------
+# ---------------- 4) 运行镜像 ----------------
 # 只有 COPY，没有 RUN：镜像体积小，且不依赖构建机的任何环境
 FROM public.ecr.aws/docker/library/python:3.13-slim
 
@@ -59,9 +80,10 @@ LABEL org.opencontainers.image.title="polyglot-arch-demo" \
 
 WORKDIR /app
 
-COPY --from=go-builder  /out/polyglot-server /app/polyglot-server
-COPY --from=cpp-builder /out/bench-cpp       /app/bench-cpp
-COPY python/bench.py                         /app/bench.py
+COPY --from=go-builder  /out/polyglot-server            /app/polyglot-server
+COPY --from=cpp-builder /out/bench-cpp                  /app/bench-cpp
+COPY --from=cgo-builder /out/lib/libgodemo_native.so    /app/lib/
+COPY python/bench.py                                    /app/bench.py
 
 # 非 root 运行；数字 UID 无需 useradd
 USER 10001

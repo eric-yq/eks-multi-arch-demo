@@ -13,7 +13,7 @@
 
   <groupId>com.example</groupId>
   <artifactId>java-arch-demo</artifactId>
-  <version>1.1.0</version>
+  <version>1.2.0</version>
   <name>java-arch-demo</name>
   <description>Multi-arch (amd64 / aarch64) Java demo for Amazon EKS</description>
 
@@ -31,6 +31,20 @@
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <!--
+      带原生代码的第三方依赖：lz4-java 的 jar 里打包了各架构的 liblz4-java.so
+      （linux/amd64、linux/aarch64、ppc64le、s390x ...），运行时按当前架构解压加载，
+      所以 x86 与 Graviton 都能走 JNI 快路径，不需要我们做任何事。
+      这类依赖是 Graviton 迁移里最需要逐个确认的：上游没提供 aarch64 就会退化或直接失败。
+
+      注意版本：1.8.1 在 Maven Central 只发布了 pom、没有 jar，不要升级到 1.8.1。
+    -->
+    <dependency>
+      <groupId>org.lz4</groupId>
+      <artifactId>lz4-java</artifactId>
+      <version>1.8.0</version>
     </dependency>
   </dependencies>
 

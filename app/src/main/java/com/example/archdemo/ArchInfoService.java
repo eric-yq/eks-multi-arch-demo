@@ -18,11 +18,14 @@ public class ArchInfoService {
 
     private final String appName;
     private final String appVersion;
+    private final Lz4Service lz4Service;
 
     public ArchInfoService(@Value("${spring.application.name:java-arch-demo}") String appName,
-                           @Value("${demo.version:1.0.0}") String appVersion) {
+                           @Value("${demo.version:1.0.0}") String appVersion,
+                           Lz4Service lz4Service) {
         this.appName = appName;
         this.appVersion = appVersion;
+        this.lz4Service = lz4Service;
     }
 
     /** JVM 上报的 os.arch：x86_64 上为 amd64，Graviton/ARM 上为 aarch64。 */
@@ -87,11 +90,21 @@ public class ArchInfoService {
         kubernetes.put("nodeInstanceType", env("NODE_INSTANCE_TYPE"));
         kubernetes.put("hostname", hostname());
 
+        // 原生依赖：一个是第三方自带各架构 .so，一个是自研需按架构编译
+        Map<String, Object> nativeDeps = new LinkedHashMap<>();
+        nativeDeps.put("lz4Implementation", lz4Service.implementation());
+        nativeDeps.put("lz4UsingNativeSo", lz4Service.usingNativeImplementation());
+        nativeDeps.put("archdemoNativeSo", NativeLib.isAvailable()
+                ? NativeLib.infoOrUnavailable()
+                : "unavailable（见 /api/native）");
+        nativeDeps.put("archdemoNativeArch", NativeLib.archOrUnknown());
+
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("app", app);
         result.put("architecture", arch);
         result.put("jvm", jvm);
         result.put("resources", resources);
+        result.put("nativeDependencies", nativeDeps);
         result.put("kubernetes", kubernetes);
         return result;
     }

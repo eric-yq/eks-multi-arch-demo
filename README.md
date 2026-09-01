@@ -14,9 +14,19 @@
 | 组成 | 说明 |
 | --- | --- |
 | EKS 集群 | `multi-arch-demo`，Kubernetes 1.36，us-east-1 |
-| Java 应用 | Spring Boot 3.5.16 + Java 21，暴露架构信息与一个简易 CPU 压测接口 |
+| Java 应用 | Spring Boot 3.5.16 + Java 21，含 lz4 第三方原生依赖与自研 JNI 库 |
+| 多语言应用 | Go + Python + C++ 单镜像，含 CGO 原生库与按架构分支的 SIMD 代码 |
 | 镜像 | 单个 tag 的 manifest list，同时包含 `linux/amd64` 与 `linux/arm64` |
 | 部署 | 两个 Deployment 只有 `nodeSelector: kubernetes.io/arch` 一处不同，一个 Service 统一入口 |
+
+两个服务合起来覆盖了 Graviton 迁移中原生依赖的四种典型情况：
+
+| 情况 | 例子 | 迁移工作量 |
+| --- | --- | --- |
+| 架构无关产物 | Java 的 jar、Python 的 .py | 零 |
+| 第三方依赖自带各架构原生库 | `lz4-java`（jar 内含 amd64/aarch64 的 .so） | 零，但要逐个确认上游是否提供 |
+| 自研原生库 | Java 的 JNI `.so`、Go 经 CGO 调用的 `.so` | 必须按架构各编译一次 |
+| 架构特定指令集代码 | C++ 的 SIMD（x86 SSE2/AVX2 vs arm64 NEON） | 要为每种架构分别实现并校验结果一致 |
 
 ## 目录结构
 
@@ -26,18 +36,26 @@
 │   ├── cluster.yaml                # 步骤 1：集群 + 唯一的 x86 节点组
 │   └── nodegroup-c7g.yaml          # 步骤 6：增量添加的 Graviton3 节点组（只含节点组）
 ├── app/                            # Java 应用
-│   ├── pom.xml
-│   ├── Dockerfile                  # 多架构镜像（只 COPY jar，无需 QEMU 交叉执行）
+│   ├── pom.xml                     # 含 lz4-java 依赖（jar 内置各架构 .so）
+│   ├── Dockerfile                  # 含 native-builder 阶段：编译 JNI 的 .so
+│   ├── native/                     # 自研 C 库（纯标量，无 SIMD）+ JNI 桥接
+│   │   ├── archdemo_native.c/.h
+│   │   └── archdemo_jni.c
 │   └── src/main/java/com/example/archdemo/
 │       ├── ArchDemoApplication.java
-│       ├── ArchInfoService.java    # 采集 os.arch / JVM / Pod / Node 信息
+│       ├── ArchInfoService.java    # 采集 os.arch / JVM / Pod / Node / 原生依赖信息
 │       ├── ArchInfoController.java # GET /  与  GET /api/info
-│       └── BenchmarkController.java# GET /api/bench  简易 CPU 对比
+│       ├── BenchmarkController.java# GET /api/bench  简易 CPU 对比
+│       ├── Lz4Service.java         # lz4 压缩/解压往返与吞吐
+│       ├── NativeLib.java          # JNI 绑定，加载 libarchdemo_native.so
+│       └── NativeDepsController.java # GET /api/compress、GET /api/native
 ├── polyglot/                       # 第二个 demo 服务：Go + Python + C++ 单镜像
 │   ├── Dockerfile                  # 原生多阶段构建（每种架构各构建一次，无需 QEMU）
 │   ├── go/                         # HTTP 前门 + Go 压测 + cgroup CPU 识别
+│   │   └── native_cgo.go           # CGO 绑定，链接 libgodemo_native.so
+│   ├── cgo/                        # 自研 C 库（纯标量，无 SIMD），供 Go 调用
 │   ├── python/bench.py             # Python 压测（多进程绕开 GIL）
-│   └── cpp/bench.cpp               # C++ 压测（OpenSSL EVP，必须按架构编译）
+│   └── cpp/bench.cpp               # C++ 压测 + 按架构分支的 SIMD（SSE2/AVX2/NEON）
 ├── k8s/
 │   ├── 00-namespace.yaml
 │   ├── deployment-amd64.yaml       # 步骤 4：nodeSelector kubernetes.io/arch=amd64
@@ -142,10 +160,30 @@ kubectl get nodes -L kubernetes.io/arch,node.kubernetes.io/instance-type,eks.ama
 
 | 路径 | 用途 |
 | --- | --- |
-| `GET /` | 纯文本汇总：CPU 架构、JVM、Pod、Node、节点组、实例类型 |
+| `GET /` | 纯文本汇总：CPU 架构、JVM、Pod、Node、节点组、实例类型、原生依赖 |
 | `GET /api/info` | 同样的信息，JSON 格式，便于脚本统计架构分布 |
-| `GET /api/bench?iterations=2000000` | SHA-256 循环，粗略对比 x86 与 Graviton 的 CPU 表现 |
+| `GET /api/bench?iterations=2000000&threads=4` | SHA-256 循环，单核/多核两种口径 |
+| `GET /api/compress?sizeBytes=262144&iterations=50` | lz4 压缩/解压往返、压缩率、吞吐 |
+| `GET /api/native?iterations=20000&sizeBytes=4096` | 经 JNI 调用自研 C 库（CRC-32 / FNV-1a） |
 | `GET /actuator/health/{liveness,readiness}` | 给 k8s 探针用 |
+
+两个原生依赖接口的看点（实测于 c6a.xlarge 容器内）：
+
+```
+/api/compress  implementation=LZ4Factory:JNI  usingNativeSo=true
+               压缩 6125 MiB/s  解压 11782 MiB/s  压缩率 48.44  往返校验通过
+/api/native    nativeInfo=archdemo_native 1.0 (gcc 11.5.0, amd64, scalar/no-simd)
+               nativeArch=amd64  archMatchesJvm=true
+```
+
+`archMatchesJvm` 是关键断言：`.so` 的编译期宏与 JVM 的 `os.arch` 一致，
+才能证明加载到的是当前架构的库，而不是碰巧能跑起来。
+
+> **lz4 有个坑值得单独讲。** `LZ4Factory.fastestInstance()` 在 Spring Boot fat jar 下
+> **不会**选 JNI 实现：lz4-java 要求 `Native` 类由 system classloader 加载，而 fat jar 用的是
+> `LaunchedClassLoader`，条件不满足就静默退回纯 Java 实现。实测差距很大——
+> 显式调用 `nativeInstance()` 压缩 6125 MiB/s，退回纯 Java 只有 404 MiB/s（15 倍）。
+> 接口里同时输出 `implementation` 与 `fastestInstanceWouldPick` 两个字段，方便现场对比。
 
 本机快速试跑：
 
@@ -182,16 +220,27 @@ docker buildx build \
   --push app/
 ```
 
-**为什么一个 jar 能同时服务两种架构**：jar 里是与架构无关的字节码，差异只在基础镜像自带的 JVM。
-`Dockerfile` 因此只有 `FROM` / `COPY` / `ENV`，没有需要在目标架构上执行的 `RUN`，
-在 x86 机器上交叉构建 arm64 镜像**不需要 QEMU 模拟**，构建时间和单架构几乎一样：
+**jar 是架构无关的，但这个镜像已经不是了。** 自从引入 JNI 原生库之后，镜像里有三类产物：
+
+| 产物 | 架构属性 |
+| --- | --- |
+| `app.jar` | 架构无关字节码，一份通吃 |
+| lz4-java 的 `liblz4-java.so` | 第三方依赖自带 amd64/aarch64，运行时按架构解压加载 |
+| `libarchdemo_native.so` | **自研，必须为每种架构分别编译** |
+
+所以 `app/Dockerfile` 多了一个 `native-builder` 阶段：
 
 ```dockerfile
-FROM public.ecr.aws/amazoncorretto/amazoncorretto:21-al2023-headless
-COPY target/java-arch-demo.jar /app/app.jar
-USER 10001                     # 数字 UID，避免 RUN useradd 引入跨架构执行
-ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
+# 用完整版 Corretto：有 jni.h，且与运行镜像同为 AL2023（glibc 2.34），编出的 .so 能直接加载
+FROM public.ecr.aws/amazoncorretto/amazoncorretto:21-al2023 AS native-builder
+RUN dnf install -y gcc && dnf clean all
+RUN gcc -O2 -fPIC -shared -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+        -o /out/lib/libarchdemo_native.so native/archdemo_native.c native/archdemo_jni.c
 ```
+
+这个 `RUN` 必须在目标架构下执行，于是**单机交叉构建（方式 A）现在需要 QEMU**，
+`03-build-push-image.sh` 会先检查 binfmt handler，缺少时直接中止并提示两个选项。
+想完全避开模拟就用方式 B（03a + 03b 各架构原生构建）。
 
 校验镜像是一个 manifest list：
 
@@ -449,10 +498,51 @@ NODEGROUP_FILE=infra/nodegroup-c6g.yaml C7G_NODEGROUP=ng-graviton-c6g \
 
 | 语言 | 产物 | 换架构要做什么 |
 | --- | --- | --- |
-| Java | jar（架构无关字节码） | 什么都不用做，一份产物通吃 |
+| Java | jar（架构无关字节码） | 一份产物通吃；但一旦引入 JNI 原生库就和下面几种一样了 |
 | Python | .py 源码（解释执行） | 源码不用改，但要留意带原生扩展的依赖（wheel 是否有 aarch64 版） |
-| Go | 原生二进制 | 必须为每种架构编译一次（交叉编译很容易，`GOARCH` 即可） |
-| C++ | 原生二进制 | 必须为每种架构编译一次，且依赖库（本例 OpenSSL）也要对应架构 |
+| Go | 原生二进制 | 必须为每种架构编译一次；**启用 CGO 后**还要连带处理原生依赖与 glibc 兼容 |
+| C++ | 原生二进制 | 必须为每种架构编译一次，依赖库（本例 OpenSSL）也要对应架构；SIMD 代码还要各写一份 |
+
+本服务里三处与架构强相关的实现：
+
+**1. Go 经 CGO 调用自研 C 库。** `polyglot/cgo/` 是纯标量 C，构建时由 `cgo-builder` 阶段
+编译成 `libgodemo_native.so`，Go 侧用 `CGO_ENABLED=1` 链接，rpath 写死 `/app/lib`，
+运行镜像不需要 `LD_LIBRARY_PATH`。启用 CGO 的代价是产物不再纯静态、会动态链接 glibc，
+所以构建镜像与运行镜像必须 glibc 兼容（本 demo 两者同为 Debian bookworm）。
+
+**2. C++ 的 SIMD 按架构分支。** 同一个 `bench.cpp`，靠编译器预定义宏选择实现：
+
+```cpp
+#if defined(__x86_64__)
+#include <immintrin.h>          // x86：SSE2 基线，-mavx2 时走 AVX2
+#elif defined(__aarch64__)
+#include <arm_neon.h>           // arm64：NEON 基线
+#endif
+...
+#if defined(__AVX2__)           // _mm256_sad_epu8，一次 32 字节
+#elif defined(DEMO_ARCH_X86) && defined(__SSE2__)   // _mm_sad_epu8，一次 16 字节
+#elif defined(DEMO_ARCH_ARM64)  // vpadalq_u8 + vaddlvq_u16，一次 16 字节
+#else                           // 标量兜底
+#endif
+```
+
+`/api/simd` 会同时跑 SIMD 与标量两条路径并**断言结果逐位相等**（`resultsMatch`）。
+移植 SIMD 代码时这个自校验比性能数字重要得多——本 demo 开发过程中它就抓出一个真实 bug：
+NEON 归约误用了 `vaddvq_u16`（返回 `uint16_t`），8 个 lane 合计最大 522240 会被静默截断，
+换成宽化版 `vaddlvq_u16`（返回 `uint32_t`）才正确。x86 路径完全正常，只有 arm64 错——
+这正是跨架构 SIMD 最容易出的问题。
+
+实测（c6a.xlarge 容器内，1 MiB 缓冲 × 200 轮）：
+
+| 路径 | 吞吐 | 相对标量 |
+| --- | --- | --- |
+| x86 SSE2（基线） | 34.95 GiB/s | 11.7x |
+| x86 AVX2（`-mavx2`） | 47.86 GiB/s | 16.7x |
+| 标量 | 2.99 GiB/s | 1x |
+
+**3. 测 SIMD 必须防编译器优化。** 第一版把结果算在循环外，量出 4003 GiB/s、加速 1413 倍这种
+明显不可信的数字——编译器识别出循环不变量直接提到外面算了一次。现在每轮改写一个字节
+并累加返回值，数字才落回内存带宽量级。
 
 因此这个镜像采用**在对应架构的实例上原生构建**：
 
@@ -508,10 +598,12 @@ BENCH_THREADS=1 ./scripts/09-verify-polyglot.sh
 
 | 路径 | 用途 |
 | --- | --- |
-| `GET /` | 纯文本：架构、容器可用核数、三种语言的运行时版本、Pod/Node 信息 |
+| `GET /` | 纯文本：架构、容器可用核数、三种语言运行时、原生依赖与 SIMD 路径 |
 | `GET /api/info` | 同样信息的 JSON |
 | `GET /api/bench?lang=all` | 三种语言各跑一遍，`lang` 也可取 `go` / `python` / `cpp` |
 | `GET /api/bench?lang=cpp&threads=1&iterations=2000000` | 指定语言、线程数、每线程迭代次数 |
+| `GET /api/native?iterations=20000&sizeBytes=4096` | Go 经 CGO 调用自研 C 库（Adler-32 / FNV-1a） |
+| `GET /api/simd?bytes=1048576&iterations=200` | C++ SIMD vs 标量，含结果一致性校验 |
 | `GET /healthz`、`GET /readyz` | 探针 |
 
 架构：Go 进程做 HTTP 前门，Python 与 C++ 以子进程方式调用（各自计时并输出 JSON，
@@ -605,6 +697,14 @@ eksctl delete nodegroup --cluster multi-arch-demo --region us-east-1 --name ng-g
 - 纯 Java / JVM 代码无需改动即可运行在 aarch64；风险点在**含原生代码的依赖**
   （JNI、`.so`、netty-tcnative、snappy/lz4、rocksdb、部分商业 Agent 等），
   需要确认依赖版本提供 `linux-aarch64` 分类器或原生库。
+  本 demo 用 `lz4-java` 演示了"上游已提供各架构 .so"的理想情况，
+  以及 fat jar 下 `fastestInstance()` 会静默退回纯 Java 的坑（见步骤 4 的说明）。
+- **自研原生库要纳入 CI 的架构矩阵**：本 demo 的 `libarchdemo_native.so`（JNI）与
+  `libgodemo_native.so`（CGO）都必须按架构各编译一次，且编译镜像与运行镜像的 glibc 要兼容
+  （Java 侧统一 AL2023/glibc 2.34，Go 侧统一 Debian bookworm/glibc 2.36）。
+- **SIMD 代码要按架构分别实现并做结果自校验**：x86 的 SSE2/AVX2 与 arm64 的 NEON 语义不同，
+  归约指令的返回宽度尤其容易踩（`vaddvq_u16` vs `vaddlvq_u16`）。
+  没有"SIMD 结果 == 标量结果"的断言，这类 bug 在功能测试里很难暴露。
 - 建议使用较新的 JVM（本 demo 用 Corretto 21），新版本在 aarch64 上的 JIT 与 GC 优化更完整。
 - CI 中构建多架构镜像：本 demo 的“只 COPY jar”方式最省事；如果 Dockerfile 必须执行
   `RUN`（编译原生依赖等），则需要 QEMU（`docker run --privileged tonistiigi/binfmt --install arm64`）

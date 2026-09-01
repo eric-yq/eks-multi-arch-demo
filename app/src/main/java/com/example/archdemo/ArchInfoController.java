@@ -31,6 +31,8 @@ public class ArchInfoController {
         Map<String, Object> jvm = (Map<String, Object>) info.get("jvm");
         @SuppressWarnings("unchecked")
         Map<String, Object> resources = (Map<String, Object>) info.get("resources");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> nativeDeps = (Map<String, Object>) info.get("nativeDependencies");
 
         return """
                EKS multi-arch Java demo
@@ -45,7 +47,12 @@ public class ArchInfoController {
                节点组             : %s
                实例类型           : %s
                ------------------------------------------
-               更多信息: /api/info | 压测: /api/bench?iterations=2000000
+               原生依赖
+                 lz4-java         : %s（jar 内置各架构 .so）
+                 自研 JNI 库      : %s
+               ------------------------------------------
+               更多信息: /api/info      | 压测    : /api/bench?iterations=2000000
+               lz4    : /api/compress  | JNI 调用: /api/native
                """.formatted(
                        ((Map<?, ?>) info.get("architecture")).get("osArch"),
                        ((Map<?, ?>) info.get("architecture")).get("platform"),
@@ -56,7 +63,9 @@ public class ArchInfoController {
                        k8s.get("podName"),
                        k8s.get("nodeName"),
                        k8s.get("nodeGroup"),
-                       k8s.get("nodeInstanceType"));
+                       k8s.get("nodeInstanceType"),
+                       nativeDeps.get("lz4Implementation"),
+                       nativeDeps.get("archdemoNativeSo"));
     }
 
     @GetMapping(value = "/api/info", produces = MediaType.APPLICATION_JSON_VALUE)
