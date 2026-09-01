@@ -202,6 +202,105 @@ PY
 # 兼容旧名字
 render_cluster_config() { render_eksctl_config "infra/cluster.yaml"; }
 
+# ---------------------------------------------------------------------------
+# 机型架构判定：向 EC2 API 查，不猜机型名前缀。
+#
+# 为什么必须查 API：eksctl 是按**硬编码的 Graviton 机型家族列表**（a1/t4g/m6g/c6g/
+# c7g/c8g/...）推断架构的，遇到列表里没有的新家族（例如 c9g）会当成 x86，
+# 进而给托管节点组填 amiType=AL2023_x86_64_STANDARD，EKS 直接报：
+#   [c9g.xlarge] is not a valid instance type for requested amiType AL2023_x86_64_STANDARD
+# 这个错误在 `eksctl create nodegroup --dry-run` 阶段看不出来——dry-run 只回显配置里的
+# amiFamily，真正的 amiType 是生成 CloudFormation 时才推断的。
+# 参考：https://docs.aws.amazon.com/eks/latest/eksctl/arm-support.html
+instance_arch() {
+  local it="$1" arch_list
+  need aws
+  arch_list="$(aws ec2 describe-instance-types --instance-types "${it}" \
+    --region "${AWS_REGION}" \
+    --query 'InstanceTypes[0].ProcessorInfo.SupportedArchitectures' \
+    --output text 2>/dev/null || true)"
+  case "${arch_list}" in
+    *arm64*)  echo arm64 ;;
+    *x86_64*) echo x86_64 ;;
+    *) die "无法确定机型 ${it} 的架构（区域 ${AWS_REGION}）。请确认机型名拼写正确、且该机型在本区域可用：
+  aws ec2 describe-instance-type-offerings --location-type availability-zone \\
+    --filters Name=instance-type,Values=${it} --region ${AWS_REGION}" ;;
+  esac
+}
+
+# 架构 → EKS 托管节点组的 AL2023 amiType
+eks_ami_type() {
+  case "$1" in
+    arm64)  echo AL2023_ARM_64_STANDARD ;;
+    x86_64) echo AL2023_x86_64_STANDARD ;;
+    *) die "未知架构：$1" ;;
+  esac
+}
+
+# 从集群里已存在的任一节点组继承 nodeRole 与私有子网，
+# 这样新增节点组不必再建 IAM 角色，也保证落在与现有节点相同的子网里。
+# 输出两行：第 1 行 nodeRole ARN，第 2 行逗号分隔的 subnet id。
+inherit_nodegroup_networking() {
+  local src_ng
+  src_ng="$(aws eks list-nodegroups --cluster-name "${CLUSTER_NAME}" --region "${AWS_REGION}" \
+    --query 'nodegroups[0]' --output text 2>/dev/null || true)"
+  [[ -n "${src_ng}" && "${src_ng}" != "None" ]] \
+    || die "集群 ${CLUSTER_NAME} 里还没有任何节点组，无法继承 nodeRole/子网。请先执行 ./scripts/01-create-cluster.sh"
+  aws eks describe-nodegroup --cluster-name "${CLUSTER_NAME}" --nodegroup-name "${src_ng}" \
+    --region "${AWS_REGION}" --query 'nodegroup.nodeRole' --output text
+  aws eks describe-nodegroup --cluster-name "${CLUSTER_NAME}" --nodegroup-name "${src_ng}" \
+    --region "${AWS_REGION}" --query 'join(`,`, nodegroup.subnets)' --output text
+}
+
+# 删除所有"不由 eksctl 管理"的托管节点组（即没有对应 CloudFormation 栈的）。
+#
+# 为什么需要：步骤 6 用 aws eks create-nodegroup 创建 Graviton 节点组（eksctl 会误判
+# c9g 架构），这类节点组不属于任何 eksctl 栈。而 EKS 的 DeleteCluster 要求**先删完所有
+# 托管节点组**，否则报 ResourceInUseException。所以删集群前必须显式清掉它们。
+# 参考：https://docs.aws.amazon.com/eks/latest/userguide/delete-cluster.html
+delete_non_eksctl_nodegroups() {
+  local ngs ng stack_status
+  ngs="$(aws eks list-nodegroups --cluster-name "${CLUSTER_NAME}" --region "${AWS_REGION}" \
+    --query 'nodegroups[]' --output text 2>/dev/null || true)"
+  [[ -n "${ngs}" && "${ngs}" != "None" ]] || return 0
+
+  for ng in ${ngs}; do
+    stack_status="$(aws cloudformation describe-stacks \
+      --stack-name "eksctl-${CLUSTER_NAME}-nodegroup-${ng}" --region "${AWS_REGION}" \
+      --query 'Stacks[0].StackStatus' --output text 2>/dev/null || true)"
+    if [[ -n "${stack_status}" && "${stack_status}" != "None" ]]; then
+      log "节点组 ${ng} 由 eksctl 管理（栈 ${stack_status}），交给 eksctl 删除"
+      continue
+    fi
+    warn "节点组 ${ng} 没有 eksctl 栈（由 aws CLI 创建），先用 API 删除它"
+    aws eks delete-nodegroup --cluster-name "${CLUSTER_NAME}" --region "${AWS_REGION}" \
+      --nodegroup-name "${ng}" >/dev/null 2>&1 || { warn "删除 ${ng} 失败"; continue; }
+    aws eks wait nodegroup-deleted --cluster-name "${CLUSTER_NAME}" --region "${AWS_REGION}" \
+      --nodegroup-name "${ng}" || warn "等待 ${ng} 删除超时"
+  done
+}
+
+# 清理上一次失败尝试留下的 CloudFormation 栈。
+# 只处理明确处于"已死"状态的栈（里面没有存活资源），其他状态一律不动。
+clean_failed_nodegroup_stack() {
+  local ng="$1" stack="eksctl-${CLUSTER_NAME}-nodegroup-$1" status
+  command -v aws >/dev/null 2>&1 || return 0
+  status="$(aws cloudformation describe-stacks --stack-name "${stack}" --region "${AWS_REGION}" \
+    --query 'Stacks[0].StackStatus' --output text 2>/dev/null || true)"
+  [[ -n "${status}" && "${status}" != "None" ]] || return 0
+  case "${status}" in
+    ROLLBACK_COMPLETE|CREATE_FAILED|ROLLBACK_FAILED|DELETE_FAILED)
+      warn "发现上次失败留下的 CloudFormation 栈 ${stack}（${status}），先删除它再重建"
+      aws cloudformation delete-stack --stack-name "${stack}" --region "${AWS_REGION}"
+      aws cloudformation wait stack-delete-complete --stack-name "${stack}" \
+        --region "${AWS_REGION}" 2>/dev/null || warn "等待栈删除超时，请到 CloudFormation 控制台确认"
+      ;;
+    *)
+      die "CloudFormation 栈 ${stack} 当前状态为 ${status}，不是失败状态。
+请先自行确认它的归属再重试（避免误删正在使用的资源）。" ;;
+  esac
+}
+
 # 找到一个 >= 21 的 JDK（Spring Boot 3.5 + Java 21）
 find_jdk21() {
   local candidate

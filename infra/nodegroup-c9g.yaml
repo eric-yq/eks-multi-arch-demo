@@ -1,9 +1,21 @@
 # 增量添加的 Graviton5 节点组（1 x c9g.xlarge / ARM64）。
 #
-# 这是一个"只含节点组"的 eksctl 配置：metadata 必须与已存在的集群一致。
-# 创建命令：
+# ⚠️ 重要：这个文件**不能**直接用 `eksctl create nodegroup -f` 创建 c9g 节点组。
+#
+# eksctl 按硬编码的 Graviton 机型家族列表（a1/t4g/m6g/c6g/c7g/c8g/...）推断架构，
+# c9g 不在列表里，会被当成 x86 并填入 amiType=AL2023_x86_64_STANDARD，EKS 拒绝：
+#   [c9g.xlarge] is not a valid instance type for requested amiType AL2023_x86_64_STANDARD
+# `--dry-run` 查不出这个问题：它只回显下面的 amiFamily，amiType 是生成 CFN 时才推断的。
+# 参考：https://docs.aws.amazon.com/eks/latest/eksctl/arm-support.html
+#
+# 所以请用脚本创建（内部走 aws eks create-nodegroup 并显式指定 amiType）：
 #   ./scripts/06-add-c9g-nodegroup.sh
-#   （等价：eksctl create nodegroup -f infra/nodegroup-c9g.yaml）
+#
+# 本文件保留两个用途：
+#   1. 作为节点组配置的可读说明（名称/机型/标签/容量与脚本保持一致）
+#   2. 给 eksctl 认识的机型使用，例如 c6g/c7g/c8g：
+#      USE_EKSCTL=true C9G_NODEGROUP=ng-graviton-c8g C9G_INSTANCE_TYPE=c8g.xlarge \
+#        NODEGROUP_FILE=infra/nodegroup-c8g.yaml ./scripts/06-add-c9g-nodegroup.sh
 #
 # 为什么单独一个文件：eksctl create cluster 不支持 --include 过滤节点组，
 # 如果把它写进 infra/cluster.yaml，步骤 1 建集群时就会一起把 Graviton 节点组建出来，

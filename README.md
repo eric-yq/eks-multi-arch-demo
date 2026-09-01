@@ -483,7 +483,8 @@ kubectl -n demo get svc java-arch-demo-nlb -w    # 等 EXTERNAL-IP
 **06 只加节点组**（不需要镜像，也不需要 ECR 权限）：
 
 1. 打印改造前的节点与 Pod 分布，现场对照用
-2. `eksctl create nodegroup -f infra/nodegroup-c9g.yaml` 创建节点组（约 3~5 分钟）
+2. 查出 `c9g.xlarge` 的架构并用显式 `--ami-type` 调 `aws eks create-nodegroup`
+   创建节点组（约 3~5 分钟；为什么不用 eksctl 见上面那一节）
 3. 等节点带上 `eks.amazonaws.com/nodegroup=ng-graviton-c9g` 并 Ready
 4. 再打印一次分布——新节点已就绪但上面没有任何业务 Pod，这一步的"空窗"是演示的关键画面
 
@@ -519,7 +520,20 @@ nodeSelector:                        nodeSelector:
 
 ```bash
 IMAGE=<account>.dkr.ecr.<region>.amazonaws.com/java-arch-demo:1.0.0
-eksctl create nodegroup -f infra/nodegroup-c9g.yaml
+
+# 建 Graviton 节点组：显式指定 amiType，别让 eksctl 猜机型架构
+ROLE=$(aws eks describe-nodegroup --cluster-name multi-arch-demo --nodegroup-name ng-x86-c7i \
+         --region us-east-1 --query nodegroup.nodeRole --output text)
+SUBNETS=$(aws eks describe-nodegroup --cluster-name multi-arch-demo --nodegroup-name ng-x86-c7i \
+         --region us-east-1 --query 'nodegroup.subnets' --output text)
+aws eks create-nodegroup --cluster-name multi-arch-demo --region us-east-1 \
+  --nodegroup-name ng-graviton-c9g --node-role "$ROLE" --subnets $SUBNETS \
+  --instance-types c9g.xlarge --ami-type AL2023_ARM_64_STANDARD \
+  --disk-size 50 --scaling-config minSize=1,maxSize=2,desiredSize=1 \
+  --labels demo.arch=arm64,demo.cpu=aws-graviton5,workload=java-demo
+aws eks wait nodegroup-active --cluster-name multi-arch-demo \
+  --nodegroup-name ng-graviton-c9g --region us-east-1
+
 sed -e "s|IMAGE_PLACEHOLDER|$IMAGE|g" \
     -e "s|NODEGROUP_PLACEHOLDER|ng-graviton-c9g|g" \
     -e "s|INSTANCE_TYPE_PLACEHOLDER|c9g.xlarge|g" \
@@ -716,9 +730,9 @@ DELETE_ECR=true DELETE_CLUSTER=true ./scripts/90-cleanup.sh
   的回退路径同样跑通。
 - `eksctl create cluster -f infra/cluster.yaml --dry-run` 校验通过（EKS 1.36、1 个 x86 节点组、
   c7i.xlarge、AL2023）。
-- 把 `infra/nodegroup-c9g.yaml` 的节点组并进集群配置后 `eksctl create cluster --dry-run`
-  同样通过（eksctl 0.229.0 接受 `c9g.xlarge` + `AmazonLinux2023`，arm64 标签解析正确）。
-  这一步确认了 eksctl 认得 c9g 这个较新的机型——版本过旧会误判架构、拉到 x86 AMI。
+- **eksctl 无法创建 c9g 节点组，这是实际踩到的坑**（见下一节）。步骤 6 已改为
+  `aws eks create-nodegroup` + 显式 `--ami-type`，`instance_arch()` 对
+  c9g/c7i/c7g/c8g 四个机型的架构判定已用 EC2 API 实测通过。
 - 机型事实经 AWS EC2 / Pricing API 核对：`c7i.xlarge` 4 vCPU / 2 物理核 + SMT / 3.2 GHz /
   $0.1785，`c9g.xlarge` 4 vCPU / 4 物理核无 SMT / 3.3 GHz / $0.17388（Graviton5）。
   `c9g.xlarge` 在 us-east-1 只有 a/b/c/d 四个可用区，**f 没有**。
@@ -727,6 +741,70 @@ DELETE_ECR=true DELETE_CLUSTER=true ./scripts/90-cleanup.sh
 > **c7i / c9g 这一对尚未在真实集群上跑过。** README 里带数字的对比表都是上一版机型
 > （c6a.xlarge / c7g.xlarge）的实测值，已在各处标注。换机型后请重跑步骤 5、6 取自己的数字，
 > 尤其是 crc32 那个反例——c9g 主频已反超 c7i，结论可能翻转。
+
+### 坑：eksctl 不认识新的 Graviton 机型家族，会给 arm64 节点组填 x86 的 amiType
+
+用 `eksctl create nodegroup` 建 c9g 节点组会失败，CloudFormation 里的报错是：
+
+```
+[c9g.xlarge] is not a valid instance type for requested amiType AL2023_x86_64_STANDARD
+```
+
+原因：eksctl 判断一个机型是不是 Graviton，靠的是**硬编码的机型家族列表**
+（a1、t4g、m6g、m7g、c6g、c7g、r6g、m8g、r8g、c8g 等，见
+[eksctl ARM 支持文档](https://docs.aws.amazon.com/eks/latest/eksctl/arm-support.html)）。
+`c9g` 不在列表里，于是被当成 x86，托管节点组的 `amiType` 就填成了
+`AL2023_x86_64_STANDARD`，EKS 校验"机型架构 vs AMI 架构"时直接拒绝。
+
+配置里写 `amiFamily: AmazonLinux2023` 挡不住这个问题——`amiFamily` 只决定操作系统家族，
+真正的 `amiType` 是 eksctl 生成 CloudFormation 时按机型推断的。**`eksctl create nodegroup
+--dry-run` 也查不出来**：dry-run 只把配置展开回显，不会暴露推断出的 `amiType`。
+这一点值得记住，它意味着 dry-run 通过并不等于能创建成功。
+
+本仓库的处理方式（`scripts/env.sh` + `scripts/06-add-c9g-nodegroup.sh`）：
+
+1. `instance_arch()` 用 `aws ec2 describe-instance-types` 查**权威架构**，不猜机型名前缀
+2. 架构映射成显式的 `--ami-type`（`AL2023_ARM_64_STANDARD` / `AL2023_x86_64_STANDARD`）
+3. 用 `aws eks create-nodegroup` 创建，nodeRole 与子网继承自集群已有的节点组
+   （不额外建 IAM 角色，也保证与现有节点同子网）
+4. `clean_failed_nodegroup_stack()` 会清掉上次失败留下的 `ROLLBACK_COMPLETE` 栈再重建
+
+这样任何新机型家族都不会再踩坑，代价是这一步不再由 eksctl 配置文件驱动。
+如果你的机型 eksctl 本来就认识（c6g/c7g/c8g），可以走原来的 eksctl 路径：
+
+```bash
+USE_EKSCTL=true ./scripts/06-add-c9g-nodegroup.sh
+```
+
+节点组仍然是标准的 EKS 托管节点组，AMI 由 EKS 按 `amiType` 解析并自动更新——
+和 eksctl 建出来的没有区别，不是自定义 AMI 方案（那会把 AMI 固定在某个 ID 上）。
+
+#### 改成 CLI 创建之后，有三点和 eksctl/CloudFormation 路径不一样
+
+`eksctl create nodegroup` 实际做的是"生成一个 CloudFormation 栈"，而
+`aws eks create-nodegroup` 直接调 EKS API。**c9g 节点组不再有 CloudFormation 栈**
+（`eksctl-<集群>-nodegroup-<名字>` 这个栈不会出现），带来三个差异：
+
+| | eksctl / CFN 路径 | 现在的 CLI 路径 |
+| --- | --- | --- |
+| 声明式管理 | 有栈，可看 drift、按栈回滚 | 无栈，配置只存在于脚本参数里 |
+| EC2 实例标签 | 配置里的 `tags` 会传播到 EC2 实例 | `--tags` 只打在**节点组资源**上，不到实例 |
+| 磁盘类型 | 走自建启动模板，明确 gp3 / 50 GiB | 只能用 `--disk-size` 指定大小，类型用 EKS 默认 |
+
+前两点对本 demo 没有影响：节点组照样是托管节点组，`eksctl get nodegroup` 和控制台都能看到，
+`kubectl` 侧的标签（`demo.arch` / `demo.cpu` / `eks.amazonaws.com/nodegroup`）完全一致，
+验证脚本读的是 Kubernetes 节点标签而不是 EC2 标签。
+
+第三点如果你在意"两个节点组只有架构不同"的严谨性——x86 节点组由 eksctl 建，
+磁盘是 gp3 50 GiB；Graviton 节点组用 EKS 默认磁盘类型。要完全对齐就得给 Graviton
+节点组也建一个启动模板并用 `--launch-template` 传入。本仓库没有这么做，因为压测负载
+（SHA-256 / lz4 / crc32）是 CPU 与内存密集型，根卷类型不影响结论。
+
+还有一个连带影响已经在 `90-cleanup.sh` 里处理了：**EKS 要求先删完所有托管节点组才能删集群**
+（[文档](https://docs.aws.amazon.com/eks/latest/userguide/delete-cluster.html)），
+而 CLI 建的节点组不在 eksctl 的栈里。所以 `DELETE_CLUSTER=true` 时会先调
+`delete_non_eksctl_nodegroups()` 把没有栈的节点组用 API 删掉并等待，再执行
+`eksctl delete cluster`，避免删集群时卡在 `ResourceInUseException`。
 
 尚未执行（需要真实资源，会计费，请按需运行上面的步骤）：创建 EKS 集群、推送镜像到 ECR、
 在集群中部署与验证。
