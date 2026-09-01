@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 步骤 1：创建 EKS 集群 + **一个 x86 节点组**（1 x c6a.xlarge）
+# 步骤 1：创建 EKS 集群 + **一个 x86 节点组**（1 x c7i.xlarge）
 #
 # 对应客户现状：集群里只有 x86 节点。Graviton 节点组留到步骤 6 增量添加，
 # 这样才能演示"存量 x86 集群如何引入 Graviton"。
@@ -24,7 +24,7 @@ fi
 log "更新 kubeconfig"
 aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
 
-log "节点列表（此时应只有 1 个 amd64 / c6a.xlarge 节点）"
+log "节点列表（此时应只有 1 个 amd64 / c7i.xlarge 节点）"
 kubectl get nodes \
   -L kubernetes.io/arch,node.kubernetes.io/instance-type,eks.amazonaws.com/nodegroup
 

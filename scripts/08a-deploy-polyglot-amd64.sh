@@ -52,7 +52,7 @@ cat <<EOF
 完成。多语言服务已部署到 x86 节点组。
 
 下一步：
-  ./scripts/06-add-c7g-nodegroup.sh        # 若还没有 Graviton 节点组
+  ./scripts/06-add-c9g-nodegroup.sh        # 若还没有 Graviton 节点组
   ./scripts/08b-deploy-polyglot-arm64.sh   # 部署到 Graviton（同一个镜像 tag）
   ./scripts/09-verify-polyglot.sh          # 三语言 × 两架构 压测对比
 

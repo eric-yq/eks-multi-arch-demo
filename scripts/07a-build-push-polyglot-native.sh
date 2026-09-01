@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # 步骤 7a：在**当前这台实例**上原生构建多语言镜像（Go / Python / C++）并推送。
 #
-#   在 x86 实例（c6a）上执行      → 推送 <repo>:<tag>-amd64
-#   在 Graviton 实例（c7g）上执行 → 推送 <repo>:<tag>-arm64
+#   在 x86 实例（c7i）上执行      → 推送 <repo>:<tag>-amd64
+#   在 Graviton 实例（c9g）上执行 → 推送 <repo>:<tag>-arm64
 #
 # 为什么必须两台机器各跑一次：Go 与 C++ 会编译成原生机器码，没法像 jar / .py 那样
 # 一份产物通吃两种架构。这里刻意用**原生编译**而不是交叉编译 / QEMU 模拟：

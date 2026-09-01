@@ -79,7 +79,7 @@ std::string runtimeVersion() {
 //   1. 用 EVP_MD_fetch 显式取一次算法并复用。如果每次循环把静态的 EVP_sha256()
 //      传给 EVP_DigestInit_ex，OpenSSL 3 会在每次 init 时做一遍 provider 查找。
 //   2. 循环里不调 EVP_MD_CTX_reset —— EVP_DigestInit_ex 本身就会重置摘要状态。
-// 实测（同一台 c6a.xlarge 单线程）：正确写法 10.0M ops/s，
+// 实测（c6a.xlarge 单线程，换机型后数量级关系不变）：正确写法 10.0M ops/s，
 // 每次 reset + 静态 EVP_sha256() 只有 2.9M ops/s，legacy SHA256() 2.6M ops/s。
 int64_t sha256Loop(int iterations) {
   // 每个线程各自 fetch 一次，避免跨线程共享带来的争用

@@ -5,11 +5,11 @@
 # 但和 Java 服务不同的是，这个镜像里的 Go 与 C++ 是**原生编译**的产物，
 # arm64 那一份来自 Graviton 实例上的构建（见 07a），由 manifest list 自动分发。
 #
-# 前提：Graviton 节点组已就绪（./scripts/06-add-c7g-nodegroup.sh）
+# 前提：Graviton 节点组已就绪（./scripts/06-add-c9g-nodegroup.sh）
 #       且多架构镜像已合并（./scripts/07b-create-polyglot-manifest.sh）。
 #
 # 节点组名与实例类型默认从集群里的 arm64 节点自动读取（用于 /api/info 的展示字段），
-# 也可用 C7G_NODEGROUP / C7G_INSTANCE_TYPE 覆盖。
+# 也可用 C9G_NODEGROUP / C9G_INSTANCE_TYPE 覆盖。
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 
@@ -23,11 +23,11 @@ aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/de
 
 ARM_NODE="$(kubectl get nodes -l kubernetes.io/arch=arm64 \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-[[ -n "${ARM_NODE}" ]] || die "集群里没有 arm64 节点，请先执行 ./scripts/06-add-c7g-nodegroup.sh"
+[[ -n "${ARM_NODE}" ]] || die "集群里没有 arm64 节点，请先执行 ./scripts/06-add-c9g-nodegroup.sh"
 
-NODEGROUP_NAME="${C7G_NODEGROUP:-$(kubectl get node "${ARM_NODE}" \
+NODEGROUP_NAME="${C9G_NODEGROUP:-$(kubectl get node "${ARM_NODE}" \
   -o jsonpath='{.metadata.labels.eks\.amazonaws\.com/nodegroup}' 2>/dev/null || echo 'unknown')}"
-INSTANCE_TYPE="${C7G_INSTANCE_TYPE:-$(kubectl get node "${ARM_NODE}" \
+INSTANCE_TYPE="${C9G_INSTANCE_TYPE:-$(kubectl get node "${ARM_NODE}" \
   -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}' 2>/dev/null || echo 'unknown')}"
 
 log "目标：节点组 ${NODEGROUP_NAME}（${INSTANCE_TYPE}），节点 ${ARM_NODE}"

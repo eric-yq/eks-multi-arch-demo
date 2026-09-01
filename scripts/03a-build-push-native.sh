@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 步骤 3a（方式 B：分别原生构建）：在"当前这台机器"上原生构建单架构镜像并推送。
 #
-#   在 x86 实例（如 c6a.xlarge）上执行  → 推送 <repo>:<tag>-amd64
+#   在 x86 实例（如 c7i.xlarge）上执行  → 推送 <repo>:<tag>-amd64
 #   在 Graviton 实例（如 c6g.xlarge）上执行 → 推送 <repo>:<tag>-arm64
 #
 # 两台机器都跑完后，在任意一台执行 ./scripts/03b-create-manifest-list.sh

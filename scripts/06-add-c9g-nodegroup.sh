@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 步骤 6（增量演示）：在已有的 **纯 x86** 集群上新增一个 Graviton 节点组
-#                    （1 x c7g.xlarge）。只加节点，不动任何业务负载。
+#                    （1 x c9g.xlarge）。只加节点，不动任何业务负载。
 #
 # 加节点组与部署业务分成两个脚本，是为了在客户面前把因果讲清楚：
 #   06  只加节点组 → 此时 Graviton 节点是空的，业务还全在 x86 上
@@ -9,17 +9,17 @@
 # 前提：已完成 01（建集群）。脚本幂等：节点组已存在时跳过创建，只做就绪检查。
 # 本脚本不需要镜像，也不需要 ECR 权限。
 #
-# 费用：多出 1 台 c7g.xlarge（us-east-1 按需约 $0.145/小时）。
+# 费用：多出 1 台 c9g.xlarge（us-east-1 按需约 $0.17388/小时）。
 #
 # 想换成 Graviton2 (c6g) 做对比：
-#   NODEGROUP_FILE=infra/nodegroup-c6g.yaml C7G_NODEGROUP=ng-graviton-c6g \
-#   C7G_INSTANCE_TYPE=c6g.xlarge ./scripts/06-add-c7g-nodegroup.sh
+#   NODEGROUP_FILE=infra/nodegroup-c6g.yaml C9G_NODEGROUP=ng-graviton-c6g \
+#   C9G_INSTANCE_TYPE=c6g.xlarge ./scripts/06-add-c9g-nodegroup.sh
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 
-NODEGROUP_NAME="${C7G_NODEGROUP:-ng-graviton-c7g}"
-INSTANCE_TYPE="${C7G_INSTANCE_TYPE:-c7g.xlarge}"
-NODEGROUP_FILE="${NODEGROUP_FILE:-infra/nodegroup-c7g.yaml}"
+NODEGROUP_NAME="${C9G_NODEGROUP:-ng-graviton-c9g}"
+INSTANCE_TYPE="${C9G_INSTANCE_TYPE:-c9g.xlarge}"
+NODEGROUP_FILE="${NODEGROUP_FILE:-infra/nodegroup-c9g.yaml}"
 
 need eksctl; need kubectl; need aws
 
@@ -44,7 +44,7 @@ else
   grep -q "name: ${NODEGROUP_NAME}" "${RENDERED}" \
     || die "${NODEGROUP_FILE} 中找不到节点组 ${NODEGROUP_NAME}"
 
-  warn "即将启动 1 台 ${INSTANCE_TYPE}（约 \$0.145/小时），预计 3~5 分钟"
+  warn "即将启动 1 台 ${INSTANCE_TYPE}（约 \$0.17388/小时），预计 3~5 分钟"
   eksctl create nodegroup -f "${RENDERED}"
 fi
 

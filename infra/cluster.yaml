@@ -5,10 +5,10 @@
 #
 # 说明：
 #   本文件只创建 **一个 x86 节点组**，对应客户现状：集群里全是 x86 节点。
-#   - ng-x86-c6a : 1 x c6a.xlarge  (AMD64 / x86_64)
+#   - ng-x86-c7i : 1 x c7i.xlarge  (AMD64 / x86_64)
 #
-#   Graviton 节点组是"增量"步骤，单独放在 infra/nodegroup-c7g.yaml，
-#   由 scripts/06-add-c7g-nodegroup.sh 在集群已存在时添加。
+#   Graviton 节点组是"增量"步骤，单独放在 infra/nodegroup-c9g.yaml，
+#   由 scripts/06-add-c9g-nodegroup.sh 在集群已存在时添加。
 #   （eksctl create cluster 没有 --include 过滤，所以两者必须分文件。）
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
@@ -25,7 +25,11 @@ metadata:
 iam:
   withOIDC: true
 
-# 默认 VPC：3 个可用区（c6a / c6g / c7g 在这三个 AZ 均可用），公有 + 私有子网 + 单个 NAT 网关
+# 默认 VPC：3 个可用区（c7i / c6g / c9g 在 us-east-1a/b/c 均可用），公有 + 私有子网 + 单个 NAT 网关
+# 注意：改这个列表前先查机型的 AZ 覆盖。c9g.xlarge 目前只在 us-east-1a/b/c/d 提供，
+# us-east-1f 没有——把 f 放进来又要求 c9g 节点组落在 f 上就会创建失败。
+# 查询：aws ec2 describe-instance-type-offerings --location-type availability-zone \
+#        --filters Name=instance-type,Values=c9g.xlarge --region us-east-1
 vpc:
   nat:
     gateway: Single
@@ -53,9 +57,9 @@ addons:
 
 managedNodeGroups:
   # ---------- 节点组 1：x86_64 ----------
-  - name: ng-x86-c6a
+  - name: ng-x86-c7i
     amiFamily: AmazonLinux2023
-    instanceType: c6a.xlarge
+    instanceType: c7i.xlarge
     desiredCapacity: 1
     minSize: 1
     maxSize: 2
@@ -64,17 +68,17 @@ managedNodeGroups:
     privateNetworking: true
     labels:
       demo.arch: amd64
-      demo.cpu: intel-amd-x86
+      demo.cpu: intel-x86
       workload: java-demo
     tags:
       nodegroup-arch: amd64
-      nodegroup-instance-type: c6a.xlarge
+      nodegroup-instance-type: c7i.xlarge
     iam:
       withAddonPolicies:
         cloudWatch: true
 
   # Graviton 节点组不在这里定义：本 demo 的叙事是"先有一个纯 x86 集群，再增量加 Graviton"。
-  # 新增 Graviton 节点组见 infra/nodegroup-c7g.yaml 与 scripts/06-add-c7g-nodegroup.sh。
+  # 新增 Graviton 节点组见 infra/nodegroup-c9g.yaml 与 scripts/06-add-c9g-nodegroup.sh。
 
 cloudWatch:
   clusterLogging:

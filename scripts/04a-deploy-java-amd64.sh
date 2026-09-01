@@ -42,7 +42,7 @@ cat <<EOF
 
 演示顺序：
   ./scripts/05-verify.sh                # 验证现状（此时只有 amd64 一组）
-  ./scripts/06-add-c7g-nodegroup.sh     # 增量①：只新增 Graviton 节点组，业务不动
+  ./scripts/06-add-c9g-nodegroup.sh     # 增量①：只新增 Graviton 节点组，业务不动
   ./scripts/04b-deploy-java-arm64.sh    # 增量②：同一个镜像 tag 部署到 Graviton
   ./scripts/05-verify.sh                # 对比两种架构
 EOF

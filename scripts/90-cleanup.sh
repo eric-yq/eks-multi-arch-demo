@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 清理：默认只删除 Kubernetes 资源。
 # 删除节点组 / ECR 仓库 / EKS 集群需要显式开关，避免误删：
-#   DELETE_C7G=true ./scripts/90-cleanup.sh                      # 只删 c7g 节点组
+#   DELETE_C9G=true ./scripts/90-cleanup.sh                      # 只删 c9g 节点组
 #   DELETE_ECR=true DELETE_CLUSTER=true ./scripts/90-cleanup.sh  # 删仓库 + 整个集群
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
@@ -11,12 +11,12 @@ need kubectl
 log "删除命名空间 ${NAMESPACE} 内的 demo 资源（含可能创建的 NLB Service）"
 kubectl delete namespace "${NAMESPACE}" --ignore-not-found=true --wait=true || warn "命名空间删除失败或不存在"
 
-if [[ "${DELETE_C7G:-false}" == "true" ]]; then
+if [[ "${DELETE_C9G:-false}" == "true" ]]; then
   need eksctl
-  C7G_NODEGROUP="${C7G_NODEGROUP:-ng-graviton-c7g}"
-  warn "删除节点组 ${C7G_NODEGROUP}（保留集群与其他节点组）"
+  C9G_NODEGROUP="${C9G_NODEGROUP:-ng-graviton-c9g}"
+  warn "删除节点组 ${C9G_NODEGROUP}（保留集群与其他节点组）"
   eksctl delete nodegroup --cluster "${CLUSTER_NAME}" --region "${AWS_REGION}" \
-    --name "${C7G_NODEGROUP}" --wait || warn "节点组删除失败或不存在"
+    --name "${C9G_NODEGROUP}" --wait || warn "节点组删除失败或不存在"
 fi
 
 if [[ "${DELETE_ECR:-false}" == "true" ]]; then
@@ -34,7 +34,7 @@ if [[ "${DELETE_CLUSTER:-false}" == "true" ]]; then
   eksctl delete cluster --name "${CLUSTER_NAME}" --region "${AWS_REGION}" --wait
 else
   log "保留 EKS 集群 ${CLUSTER_NAME}（如需删除：DELETE_CLUSTER=true）"
-  warn "集群保留期间会持续计费：控制平面 + c6a.xlarge + c6g.xlarge + NAT 网关"
+  warn "集群保留期间会持续计费：控制平面 + c7i.xlarge + c6g.xlarge + NAT 网关"
 fi
 
 log "清理完成"

@@ -5,11 +5,11 @@
 # 两个 Deployment 逐字对比只有 nodeSelector 一处不同（amd64 / arm64）。
 # 这就是给客户看的核心：存量集群不动、镜像不换，业务就跑到 Graviton 上了。
 #
-# 前提：Graviton 节点组已就绪（./scripts/06-add-c7g-nodegroup.sh）+ 多架构镜像已推送（02/03）。
+# 前提：Graviton 节点组已就绪（./scripts/06-add-c9g-nodegroup.sh）+ 多架构镜像已推送（02/03）。
 # 脚本幂等：Deployment 已存在时只做滚动更新。
 #
 # 节点组名与实例类型默认从集群里的 arm64 节点自动读取（用于填 /api/info 的展示字段），
-# 也可以用 C7G_NODEGROUP / C7G_INSTANCE_TYPE 覆盖。
+# 也可以用 C9G_NODEGROUP / C9G_INSTANCE_TYPE 覆盖。
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 
@@ -26,11 +26,11 @@ aws eks update-kubeconfig --name "${CLUSTER_NAME}" --region "${AWS_REGION}" >/de
 # ---------- 1) 确认集群里有 Graviton 节点 ----------
 ARM_NODE="$(kubectl get nodes -l kubernetes.io/arch=arm64 \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-[[ -n "${ARM_NODE}" ]] || die "集群里没有 arm64 节点，请先执行 ./scripts/06-add-c7g-nodegroup.sh"
+[[ -n "${ARM_NODE}" ]] || die "集群里没有 arm64 节点，请先执行 ./scripts/06-add-c9g-nodegroup.sh"
 
-NODEGROUP_NAME="${C7G_NODEGROUP:-$(kubectl get node "${ARM_NODE}" \
+NODEGROUP_NAME="${C9G_NODEGROUP:-$(kubectl get node "${ARM_NODE}" \
   -o jsonpath='{.metadata.labels.eks\.amazonaws\.com/nodegroup}' 2>/dev/null || echo 'unknown')}"
-INSTANCE_TYPE="${C7G_INSTANCE_TYPE:-$(kubectl get node "${ARM_NODE}" \
+INSTANCE_TYPE="${C9G_INSTANCE_TYPE:-$(kubectl get node "${ARM_NODE}" \
   -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}' 2>/dev/null || echo 'unknown')}"
 
 log "目标：节点组 ${NODEGROUP_NAME}（${INSTANCE_TYPE}），节点 ${ARM_NODE}"
@@ -68,7 +68,7 @@ POD_IP="$(kubectl -n "${NAMESPACE}" get pod -l "arch=arm64" \
   -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)"
 if [[ -n "${POD_IP}" ]]; then
   log "直接访问 Graviton 上的 Pod：/api/info"
-  run_probe c7g-probe "wget -qO- http://${POD_IP}:8080/api/info; echo" \
+  run_probe c9g-probe "wget -qO- http://${POD_IP}:8080/api/info; echo" \
     || warn "采样失败（Pod 可能还在启动）"
 fi
 
@@ -94,5 +94,5 @@ cat <<EOF
 
 只删除这个节点组（保留集群与 x86 节点组）：
   eksctl delete nodegroup --cluster ${CLUSTER_NAME} --region ${AWS_REGION} --name ${NODEGROUP_NAME}
-  或：DELETE_C7G=true ./scripts/90-cleanup.sh
+  或：DELETE_C9G=true ./scripts/90-cleanup.sh
 EOF

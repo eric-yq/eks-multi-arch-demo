@@ -4,7 +4,7 @@
 
 只依赖 `docker` CLI 与 Python 3 标准库（无第三方包），与仓库其他脚本互不影响，可以单独拷走使用。
 
-配合本仓库的多架构镜像，在 x86（c6a）和 Graviton（c6g / c7g）实例上各跑一遍同一条命令，就能对比同一个镜像在不同架构上的启动表现。
+配合本仓库的多架构镜像，在 x86（c7i）和 Graviton（c6g / c9g）实例上各跑一遍同一条命令，就能对比同一个镜像在不同架构上的启动表现。
 
 ## 测量的三个阶段
 
@@ -115,13 +115,13 @@ docker 自报启动 (ms)          6      51.3      52.8      52.7      53.8     
 在两台实例上跑**同一条命令**（镜像用同一个多架构 tag，各节点会自动拉到对应架构那一份）：
 
 ```bash
-# 在 c6a.xlarge 上
+# 在 c7i.xlarge 上
 ./bench/container-startup-bench.py --image <ecr>/java-arch-demo:1.0.0 \
-  --count 50 --memory 512m --cpus 1 --ready http --json /tmp/c6a.json
+  --count 50 --memory 512m --cpus 1 --ready http --json /tmp/c7i.json
 
-# 在 c7g.xlarge 上（命令完全一样）
+# 在 c9g.xlarge 上（命令完全一样）
 ./bench/container-startup-bench.py --image <ecr>/java-arch-demo:1.0.0 \
-  --count 50 --memory 512m --cpus 1 --ready http --json /tmp/c7g.json
+  --count 50 --memory 512m --cpus 1 --ready http --json /tmp/c9g.json
 ```
 
 不要用 `--platform` 在一台机器上"模拟"另一种架构做性能对比：那会走 QEMU 翻译，数字没有参考价值。
@@ -168,7 +168,8 @@ docker ps -aq --filter label=cstart-bench=1 --filter name=^cstart-bench- | xargs
 
 ## 实测参考数据
 
-环境：`c6a.xlarge`（4 vCPU / 7.6 GiB，us-east-1c），Docker 29.1.3，串行、`--warmup 1`。仅供量级参考。
+环境：`c6a.xlarge`（上一版机型，4 vCPU / 7.6 GiB，us-east-1c），Docker 29.1.3，串行、`--warmup 1`。
+仅供量级参考；换到 `c7i.xlarge` / `c9g.xlarge` 后请自己重跑一遍。
 
 | 场景 | min | p50 | p95 | max |
 | --- | --- | --- | --- | --- |

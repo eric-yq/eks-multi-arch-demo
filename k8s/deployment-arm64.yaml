@@ -6,10 +6,10 @@
 # 镜像地址、探针、资源、安全上下文全部一致——这就是多架构镜像的价值所在。
 #
 # 镜像与节点组信息由 scripts/04b-deploy-java-arm64.sh 替换占位符后 apply。
-# 如果集群里有多个 arm64 节点组（例如同时存在 c6g 与 c7g），想精确指定其中一个，
+# 如果集群里有多个 arm64 节点组（例如同时存在 c6g 与 c9g），想精确指定其中一个，
 # 在 nodeSelector 里再加一行即可：
-#   node.kubernetes.io/instance-type: c7g.xlarge
-#   或 eks.amazonaws.com/nodegroup: ng-graviton-c7g
+#   node.kubernetes.io/instance-type: c9g.xlarge
+#   或 eks.amazonaws.com/nodegroup: ng-graviton-c9g
 apiVersion: apps/v1
 kind: Deployment
 metadata:

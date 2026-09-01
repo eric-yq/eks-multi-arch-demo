@@ -1,4 +1,4 @@
-# 把 Java 服务调度到 x86 节点组（c6a.xlarge）
+# 把 Java 服务调度到 x86 节点组（c7i.xlarge）
 # 关键点：nodeSelector 上的 kubernetes.io/arch=amd64 由 kubelet 自动打在节点上，
 # 无需自定义标签即可实现按架构调度。
 apiVersion: apps/v1
@@ -56,9 +56,9 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: NODE_GROUP
-              value: ng-x86-c6a
+              value: ng-x86-c7i
             - name: NODE_INSTANCE_TYPE
-              value: c6a.xlarge
+              value: c7i.xlarge
           resources:
             requests:
               cpu: 300m
